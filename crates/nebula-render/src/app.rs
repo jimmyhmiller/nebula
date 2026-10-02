@@ -1,11 +1,13 @@
 //! The windowed application: winit event loop, camera input, per-frame GPU
 //! layout stepping, rendering, and wiring graph algorithms to node colors.
 
+mod workflow;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use workflow::Workspace;
 
 use nebula_core::{algorithms, Graph, Pos};
-use nebula_layout::{CircleLayout, GridLayout, Layout, LayeredLayout, RadialLayout, RandomLayout};
+use nebula_layout::{CircleLayout, GridLayout, LayeredLayout, Layout, RadialLayout, RandomLayout};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
@@ -22,7 +24,7 @@ use crate::render::{RenderParams, Renderer};
 use crate::scene::{pack_rgba, GpuGraph};
 use crate::ui::{Ui, UiFrame};
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum ColorMode {
     Uniform,
     Components,
@@ -80,7 +82,7 @@ enum Seed {
 }
 
 /// Comparison used by the attribute filter.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum FilterOp {
     Contains,
     Eq,
@@ -152,6 +154,7 @@ impl FilterOp {
 
 /// "Show only" filter on a node attribute. When enabled, non-matching nodes are
 /// hidden (rgb + size zeroed, which also drops their additively-blended edges).
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct NodeFilter {
     enabled: bool,
     key: usize,
@@ -195,10 +198,19 @@ enum Legend {
     /// Single uniform color (no legend needed).
     Uniform,
     /// A continuous scalar with a turbo gradient between `lo` and `hi`.
-    Scalar { lo: f32, hi: f32, log: bool, name: String },
+    Scalar {
+        lo: f32,
+        hi: f32,
+        log: bool,
+        name: String,
+    },
     /// A categorical field: the most frequent classes as `(label, color, freq)`
     /// plus the total distinct count.
-    Categorical { count: usize, name: String, top: Vec<(f32, u32, usize)> },
+    Categorical {
+        count: usize,
+        name: String,
+        top: Vec<(f32, u32, usize)>,
+    },
 }
 
 impl Legend {
@@ -216,7 +228,12 @@ impl Legend {
                 if lo > hi {
                     Legend::None
                 } else {
-                    Legend::Scalar { lo, hi, log, name: name.to_string() }
+                    Legend::Scalar {
+                        lo,
+                        hi,
+                        log,
+                        name: name.to_string(),
+                    }
                 }
             }
             _ => Legend::None,
@@ -243,7 +260,11 @@ impl Legend {
                         (label as f32, crate::coloring::categorical(label as u32), f)
                     })
                     .collect();
-                Legend::Categorical { count, name: name.to_string(), top }
+                Legend::Categorical {
+                    count,
+                    name: name.to_string(),
+                    top,
+                }
             }
             None => Legend::None,
         }
@@ -263,7 +284,11 @@ fn grey_color(c: u32) -> u32 {
 
 /// Unpack a packed RGBA8 color into an egui color (drops alpha).
 fn egui_rgb(c: u32) -> egui::Color32 {
-    egui::Color32::from_rgb((c & 0xff) as u8, ((c >> 8) & 0xff) as u8, ((c >> 16) & 0xff) as u8)
+    egui::Color32::from_rgb(
+        (c & 0xff) as u8,
+        ((c >> 8) & 0xff) as u8,
+        ((c >> 16) & 0xff) as u8,
+    )
 }
 
 /// Format a legend endpoint: integers without decimals, else a few places.
@@ -306,8 +331,7 @@ fn draw_legend(ui: &mut egui::Ui, legend: &Legend, pinned: Option<Highlight>) ->
         Legend::Scalar { lo, hi, log, name } => {
             ui.add_space(2.0);
             let w = ui.available_width().min(220.0);
-            let (rect, resp) =
-                ui.allocate_exact_size(egui::vec2(w, 14.0), egui::Sense::click());
+            let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, 14.0), egui::Sense::click());
             let painter = ui.painter();
             let steps = 64;
             for i in 0..steps {
@@ -338,7 +362,10 @@ fn draw_legend(ui: &mut egui::Ui, legend: &Legend, pinned: Option<Highlight>) ->
             let marker = |painter: &egui::Painter, t: f32, color: egui::Color32| {
                 let mx = rect.left() + t.clamp(0.0, 1.0) * rect.width();
                 painter.line_segment(
-                    [egui::pos2(mx, rect.top() - 2.0), egui::pos2(mx, rect.bottom() + 2.0)],
+                    [
+                        egui::pos2(mx, rect.top() - 2.0),
+                        egui::pos2(mx, rect.bottom() + 2.0),
+                    ],
                     egui::Stroke::new(2.0, color),
                 );
             };
@@ -365,7 +392,11 @@ fn draw_legend(ui: &mut egui::Ui, legend: &Legend, pinned: Option<Highlight>) ->
                 });
             });
             let suffix = if *log { "  (log scale)" } else { "" };
-            ui.label(egui::RichText::new(format!("{name}{suffix}")).weak().small());
+            ui.label(
+                egui::RichText::new(format!("{name}{suffix}"))
+                    .weak()
+                    .small(),
+            );
         }
         Legend::Categorical { count, name, top } => {
             ui.add_space(2.0);
@@ -377,7 +408,11 @@ fn draw_legend(ui: &mut egui::Ui, legend: &Legend, pinned: Option<Highlight>) ->
                     let is_pinned = pinned == Some(Highlight::Category(label));
                     let hovered = resp.hovered();
                     if hovered || is_pinned {
-                        let stroke_col = if hovered { egui::Color32::WHITE } else { accent };
+                        let stroke_col = if hovered {
+                            egui::Color32::WHITE
+                        } else {
+                            accent
+                        };
                         ui.painter().rect_stroke(
                             rect,
                             2.0,
@@ -387,7 +422,8 @@ fn draw_legend(ui: &mut egui::Ui, legend: &Legend, pinned: Option<Highlight>) ->
                     }
                     if hovered {
                         out.hovered = Some(Highlight::Category(label));
-                        resp.clone().on_hover_text(format!("{freq} nodes — click to pin"));
+                        resp.clone()
+                            .on_hover_text(format!("{freq} nodes — click to pin"));
                     }
                     if resp.clicked() {
                         out.clicked = Some(Highlight::Category(label));
@@ -398,7 +434,9 @@ fn draw_legend(ui: &mut egui::Ui, legend: &Legend, pinned: Option<Highlight>) ->
                 }
             });
             ui.label(
-                egui::RichText::new(format!("{name}: {count} categories")).weak().small(),
+                egui::RichText::new(format!("{name}: {count} categories"))
+                    .weak()
+                    .small(),
             );
         }
     }
@@ -460,6 +498,8 @@ pub struct RunOptions {
     pub preview_highlight: bool,
     /// Edge set for the algorithms: "all" (union) or an edge type name.
     pub compute_over: Option<String>,
+    pub start_attribute: Option<String>,
+    pub start_filter: Option<String>,
 }
 
 impl Default for RunOptions {
@@ -489,6 +529,8 @@ impl Default for RunOptions {
             start_radial: false,
             preview_highlight: false,
             compute_over: None,
+            start_attribute: None,
+            start_filter: None,
         }
     }
 }
@@ -502,13 +544,16 @@ struct Live {
     layout: LayoutGpu,
     overlay: Overlay,
     density: Density,
+    labels: crate::labels::Labels,
+    bounds: crate::labels::Bounds,
     /// GPU pass timing (None when the adapter lacks timestamp queries).
     timer: Option<crate::gputime::GpuTimer>,
 }
 
 pub struct App {
     // Immutable inputs.
-    graph: Graph,
+    graph: Arc<Graph>,
+    work: Workspace,
     seed_positions: Vec<Pos>,
     opts: RunOptions,
     labels: Option<Vec<String>>,
@@ -564,7 +609,6 @@ pub struct App {
     show_help: bool,
     show_hud: bool,
     show_labels: bool,
-    cached_positions: Option<Vec<Pos>>,
     show_density: bool,
 
     // Input state.
@@ -615,7 +659,7 @@ impl App {
     }
 
     pub fn with_labels(
-        mut graph: Graph,
+        graph: Graph,
         seed_positions: Vec<Pos>,
         opts: RunOptions,
         labels: Option<Vec<String>>,
@@ -635,7 +679,12 @@ impl App {
         } else {
             loaded_edge_types
                 .into_iter()
-                .map(|t| EdgeType { name: t.name, color: t.color, visible: true, edges: t.edges })
+                .map(|t| EdgeType {
+                    name: t.name,
+                    color: t.color,
+                    visible: true,
+                    edges: t.edges,
+                })
                 .collect()
         };
         let init_algo_edge_set: Option<usize> = match opts.compute_over.as_deref() {
@@ -652,7 +701,12 @@ impl App {
         let init_filter = opts
             .filter
             .clone()
-            .map(|(key, op, value)| NodeFilter { enabled: true, key, op, value })
+            .map(|(key, op, value)| NodeFilter {
+                enabled: true,
+                key,
+                op,
+                value,
+            })
             .unwrap_or_default();
         let render_params = RenderParams {
             base_radius_px: opts.node_size.clamp(0.5, 64.0),
@@ -663,7 +717,13 @@ impl App {
         let hide_edges_while_simulating = opts.hide_edges_while_simulating;
         let aggregate_while_simulating = opts.aggregate_while_simulating;
         App {
-            graph,
+            work: Workspace::from_graph(
+                &graph,
+                labels.as_deref(),
+                node_attrs.as_deref(),
+                &edge_types,
+            ),
+            graph: Arc::new(graph),
             seed_positions,
             opts,
             attr_keys: attribute_keys(node_attrs.as_deref()),
@@ -695,7 +755,6 @@ impl App {
             show_help,
             show_hud: true,
             show_labels,
-            cached_positions: None,
             // Auto-enable aggregation for graphs too large to click through.
             // Jimmy-approved ONLY because the UI reflects the mode (the
             // "Aggregate (density LOD)" checkbox shows checked and can be
@@ -738,20 +797,49 @@ impl App {
         event_loop.set_control_flow(ControlFlow::Poll);
         let mut app = self;
         event_loop.run_app(&mut app)?;
+        if let Some(error) = app.work.fatal {
+            anyhow::bail!(error);
+        }
         Ok(())
     }
 
     fn init_live(&mut self, event_loop: &ActiveEventLoop) {
+        if let Err(error) = self.try_init_live(event_loop) {
+            let message = format!("Could not start Nebula: {error:#}");
+            if self.opts.max_frames.is_none() {
+                rfd::MessageDialog::new()
+                    .set_title("Nebula could not start")
+                    .set_description(&message)
+                    .set_level(rfd::MessageLevel::Error)
+                    .show();
+            }
+            self.work.fatal = Some(message);
+            event_loop.exit();
+        }
+    }
+    fn try_init_live(&mut self, event_loop: &ActiveEventLoop) -> anyhow::Result<()> {
         let attrs = Window::default_attributes()
             .with_title(&self.opts.title)
             .with_inner_size(winit::dpi::LogicalSize::new(1280.0, 800.0))
             // Headless/benchmark runs (--frames) must not steal focus.
-            .with_active(self.opts.max_frames.is_none());
-        let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
+            .with_active(self.opts.max_frames.is_none())
+            .with_visible(self.opts.max_frames.is_none());
+        let window = Arc::new(event_loop.create_window(attrs)?);
 
-        let gpu = pollster::block_on(Gpu::new(window.clone())).expect("gpu init");
-        let graph_gpu =
-            GpuGraph::upload(&gpu.device, &gpu.queue, &self.graph, &self.seed_positions, self.opts.k);
+        let gpu = pollster::block_on(Gpu::new(window.clone()))?;
+        GpuGraph::validate(
+            &self.graph,
+            &self.seed_positions,
+            self.opts.k,
+            &gpu.device.limits(),
+        )?;
+        let graph_gpu = GpuGraph::upload(
+            &gpu.device,
+            &gpu.queue,
+            &self.graph,
+            &self.seed_positions,
+            self.opts.k,
+        );
         let renderer = Renderer::new(&gpu.device, gpu.config.format, &graph_gpu);
         let layout = LayoutGpu::new(&gpu.device, &graph_gpu, &self.settings);
         let overlay = Overlay::new(&gpu.device, gpu.config.format);
@@ -784,12 +872,26 @@ impl App {
         if timer.is_none() {
             log::info!("timestamp queries unavailable — GPU pass timing disabled");
         }
-        self.live = Some(Live { window, gpu, graph_gpu, renderer, layout, overlay, density, timer });
+        let labels = crate::labels::Labels::new(&gpu, &graph_gpu);
+        let bounds = crate::labels::Bounds::new(&gpu, &graph_gpu);
+        self.live = Some(Live {
+            window,
+            gpu,
+            graph_gpu,
+            renderer,
+            layout,
+            overlay,
+            density,
+            labels,
+            bounds,
+            timer,
+        });
+        self.initialize_project_view();
         self.apply_color_mode();
         if self.opts.start_radial {
-            self.apply_radial();
+            self.apply_radial_sync();
         } else if self.opts.start_hierarchical {
-            self.apply_hierarchical();
+            self.apply_hierarchical_sync();
         }
         // Headless: preview the legend hover highlight (most frequent class).
         if self.opts.max_frames.is_some() && self.opts.preview_highlight {
@@ -814,7 +916,9 @@ impl App {
             };
             self.set_highlight(h);
         }
+        self.initialize_visibility();
         self.update_title();
+        Ok(())
     }
 
     fn apply_color_mode(&mut self) {
@@ -825,7 +929,7 @@ impl App {
         self.value_name = String::new();
         self.last_values = None;
         // Edge-aware coloring computes over the chosen algorithm edge set.
-        let mut ag = self.algo_graph();
+        let ag = self.algo_graph();
         let (colors, sizes): (Vec<u32>, Option<Vec<f32>>) = match self.color_mode {
             ColorMode::Uniform => (vec![pack_rgba(120, 170, 255, 255); n], None),
             ColorMode::Components => {
@@ -845,7 +949,7 @@ impl App {
                 )
             }
             ColorMode::PageRank => {
-                let pr = algorithms::pagerank(&mut ag, 40, 0.85);
+                let pr = algorithms::pagerank(&ag, 40, 0.85);
                 self.value_name = "pagerank".to_string();
                 self.last_values = Some(pr.clone());
                 (
@@ -854,13 +958,13 @@ impl App {
                 )
             }
             ColorMode::Coloring => {
-                let c = algorithms::greedy_coloring(&mut ag);
+                let c = algorithms::greedy_coloring(&ag);
                 self.value_name = "color".to_string();
                 self.last_values = Some(c.iter().map(|&x| x as f32).collect());
                 (coloring::categorical_colors(&c), None)
             }
             ColorMode::Communities => {
-                let labels = algorithms::label_propagation(&mut ag, 20);
+                let labels = algorithms::label_propagation(&ag, 20);
                 self.value_name = "community".to_string();
                 self.last_values = Some(labels.iter().map(|&l| l as f32).collect());
                 (coloring::categorical_colors(&labels), None)
@@ -874,7 +978,9 @@ impl App {
         match self.color_mode {
             ColorMode::Uniform => self.legend = Legend::Uniform,
             ColorMode::Degree => self.legend = Legend::scalar(&self.last_values, "degree", true),
-            ColorMode::PageRank => self.legend = Legend::scalar(&self.last_values, "pagerank", true),
+            ColorMode::PageRank => {
+                self.legend = Legend::scalar(&self.last_values, "pagerank", true)
+            }
             ColorMode::Components => {
                 self.legend = Legend::categorical(&self.last_values, "component")
             }
@@ -888,33 +994,12 @@ impl App {
         log::info!("color mode -> {}", self.color_mode.label());
     }
 
-    /// Compute the filter mask (`true` = visible), or `None` when disabled.
-    fn filter_mask(&self, n: usize) -> Option<Vec<bool>> {
-        if !self.filter.enabled {
-            return None;
-        }
-        let key = self.attr_keys.get(self.filter.key)?.clone();
-        let attrs = self.node_attrs.as_ref()?;
-        let f = &self.filter;
-        Some(
-            (0..n)
-                .map(|id| {
-                    let val = attrs
-                        .get(id)
-                        .and_then(|kv| kv.iter().find(|(k, _)| *k == key).map(|(_, v)| v.as_str()))
-                        .unwrap_or("");
-                    f.op.eval(val, &f.value)
-                })
-                .collect(),
-        )
-    }
-
     /// Push `base_colors`/`base_sizes` to the GPU, applying the attribute filter
     /// (hides non-matching) and the legend-hover highlight (fades nodes that
     /// don't match the hovered legend entry — keeps only "that color" bright).
     fn push_filtered(&mut self) {
         let n = self.graph.num_nodes() as usize;
-        let mask = self.filter_mask(n);
+        let mask = self.visibility_mask(n);
         self.filter_match_count = mask.as_ref().map(|m| m.iter().filter(|&&v| v).count());
 
         // Per-node highlight match against the hovered legend entry.
@@ -932,11 +1017,14 @@ impl App {
                 .collect()
         });
 
-        let Some(live) = self.live.as_mut() else { return };
+        let Some(live) = self.live.as_mut() else {
+            return;
+        };
 
         if mask.is_none() && matched.is_none() {
             // Fast path: nothing to modify.
-            live.graph_gpu.set_colors(&live.gpu.queue, &self.base_colors);
+            live.graph_gpu
+                .set_colors(&live.gpu.queue, &self.base_colors);
             live.graph_gpu.set_sizes(&live.gpu.queue, &self.base_sizes);
             live.renderer.mark_colors_dirty();
             return;
@@ -999,7 +1087,10 @@ impl App {
             .map(|o| o.as_ref().and_then(|s| s.trim().parse::<f32>().ok()))
             .collect();
         let any_present = vals.iter().any(|o| o.is_some());
-        let all_numeric = vals.iter().zip(&nums).all(|(v, n)| v.is_none() || n.is_some());
+        let all_numeric = vals
+            .iter()
+            .zip(&nums)
+            .all(|(v, n)| v.is_none() || n.is_some());
 
         if any_present && all_numeric {
             let scalar: Vec<f32> = nums.iter().map(|o| o.unwrap_or(0.0)).collect();
@@ -1023,7 +1114,9 @@ impl App {
     }
 
     fn update_title(&self) {
-        let Some(live) = self.live.as_ref() else { return };
+        let Some(live) = self.live.as_ref() else {
+            return;
+        };
         let title = format!(
             "{} — {} nodes · {} edges · {} · {} · {:.0} fps · steps {}{}",
             self.opts.title,
@@ -1033,7 +1126,11 @@ impl App {
             self.sim_status(),
             self.fps,
             self.total_steps,
-            if self.render_params.base_radius_px > 0.0 { "" } else { "" },
+            if self.render_params.base_radius_px > 0.0 {
+                ""
+            } else {
+                ""
+            },
         );
         live.window.set_title(&title);
     }
@@ -1048,8 +1145,12 @@ impl App {
         };
         let raw = ui.state.take_egui_input(window.as_ref());
         let ctx = ui.ctx.clone();
-        let full = ctx.run(raw, |ctx| self.build_ui(ctx));
-        ui.state.handle_platform_output(window.as_ref(), full.platform_output);
+        let full = ctx.run(raw, |ctx| {
+            self.build_ui(ctx);
+            self.update_canvas(ctx);
+        });
+        ui.state
+            .handle_platform_output(window.as_ref(), full.platform_output);
         let jobs = ctx.tessellate(full.shapes, full.pixels_per_point);
         self.ui_frame = Some(UiFrame {
             jobs,
@@ -1063,6 +1164,10 @@ impl App {
     /// directly, to avoid borrow conflicts inside egui's nested closures); the
     /// diffs are applied to `self` after the panel closes.
     fn build_ui(&mut self, ctx: &egui::Context) {
+        self.workspace_ui(ctx);
+        if self.graph.num_nodes() == 0 {
+            return;
+        }
         if !self.show_panel {
             // Panel hidden: no hover preview, but keep any pinned highlight.
             self.set_highlight(self.pinned_highlight);
@@ -1076,8 +1181,16 @@ impl App {
         let mut edge_alpha = self.render_params.edge_alpha;
         let mut draw_edges = self.draw_edges_pref;
         let mut hide_edges_sim = self.hide_edges_while_simulating;
-        let mut draw_nodes = self.live.as_ref().map(|l| l.renderer.draw_nodes).unwrap_or(true);
-        let mut edge_raster = self.live.as_ref().map(|l| l.renderer.edge_raster()).unwrap_or(false);
+        let mut draw_nodes = self
+            .live
+            .as_ref()
+            .map(|l| l.renderer.draw_nodes)
+            .unwrap_or(true);
+        let mut edge_raster = self
+            .live
+            .as_ref()
+            .map(|l| l.renderer.edge_raster())
+            .unwrap_or(false);
 
         let mut show_density = self.show_density;
         let mut aggregate_sim = self.aggregate_while_simulating;
@@ -1114,6 +1227,7 @@ impl App {
             .resizable(true)
             .default_width(250.0)
             .show(ctx, |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| {
                 ui.add_space(4.0);
                 ui.heading("nebula");
                 ui.label(format!("{n} nodes · {e} edges"));
@@ -1322,9 +1436,32 @@ impl App {
                         }
                     }
                 }
+                });
             });
 
         // --- apply diffs ---
+        if running != self.settings.running
+            || substeps != self.settings.substeps
+            || sim_duty != self.settings.sim_duty
+            || node_size != self.render_params.base_radius_px
+            || edge_alpha != self.render_params.edge_alpha
+            || show_density != self.show_density
+            || aggregate_sim != self.aggregate_while_simulating
+            || show_labels != self.show_labels
+            || algo_sel != self.algo_edge_set
+            || draw_edges != self.draw_edges_pref
+            || hide_edges_sim != self.hide_edges_while_simulating
+            || self.live.as_ref().is_some_and(|l| {
+                l.renderer.draw_nodes != draw_nodes || l.renderer.edge_raster() != edge_raster
+            })
+            || edge_visible
+                .iter()
+                .zip(&self.edge_types)
+                .any(|(v, t)| *v != t.visible)
+        {
+            self.record_view_undo();
+            self.mark_dirty();
+        }
         if running != self.settings.running {
             self.settings.running = running;
             if running {
@@ -1366,6 +1503,8 @@ impl App {
             || filter_op != self.filter.op
             || filter_value != self.filter.value;
         if filter_changed {
+            self.record_view_undo();
+            self.schedule_filter();
             self.filter.enabled = filter_enabled;
             self.filter.key = filter_key;
             self.filter.op = filter_op;
@@ -1380,8 +1519,11 @@ impl App {
         }
         // Clicking a legend entry toggles the persistent pin.
         if let Some(clicked) = legend_iact.clicked {
-            self.pinned_highlight =
-                if self.pinned_highlight == Some(clicked) { None } else { Some(clicked) };
+            self.pinned_highlight = if self.pinned_highlight == Some(clicked) {
+                None
+            } else {
+                Some(clicked)
+            };
         }
         // In headless capture there's no live pointer; keep any preset preview.
         // Otherwise the effective highlight is the hover preview, else the pin.
@@ -1395,7 +1537,9 @@ impl App {
                     let ext = self.opts.k * (n.max(1) as f32).sqrt();
                     self.reseed(&RandomLayout { extent: ext });
                 }
-                Seed::Grid => self.reseed(&GridLayout { spacing: self.opts.k }),
+                Seed::Grid => self.reseed(&GridLayout {
+                    spacing: self.opts.k,
+                }),
                 Seed::Circle => {
                     let r = self.opts.k * (n.max(1) as f32).sqrt() * 0.5;
                     self.reseed(&CircleLayout { radius: r });
@@ -1410,6 +1554,7 @@ impl App {
         if self.live.is_none() {
             return;
         }
+        self.poll_jobs();
         self.run_ui();
 
         // Refresh selection geometry (node + neighbor positions) so the marker,
@@ -1417,17 +1562,11 @@ impl App {
         if let Some(sel) = self.selected {
             self.refresh_selection(sel);
         }
-        // For label rendering on modest graphs, keep a CPU copy of positions.
-        if self.show_labels && self.graph.num_nodes() <= 50_000 {
-            let pos = self
-                .live
-                .as_ref()
-                .and_then(|live| crate::readback::read_positions(&live.gpu, &live.graph_gpu));
-            if pos.is_some() {
-                self.cached_positions = pos;
+        if self.show_labels {
+            let camera = self.camera.uniform();
+            if let Some(live) = self.live.as_mut() {
+                live.labels.update(&live.gpu, &live.graph_gpu, &camera);
             }
-        } else {
-            self.cached_positions = None;
         }
         // Build overlay commands before borrowing live mutably.
         let overlay_cmds = self.build_overlay();
@@ -1462,6 +1601,7 @@ impl App {
 
         // Advance layout, cooling alpha so the simulation converges and stops.
         if stepping {
+            self.work.simulation_changed();
             let decay = (1.0 - self.settings.alpha_decay).powi(self.settings.substeps as i32);
             self.settings.alpha *= decay;
             live.layout.update_settings(&live.gpu.queue, &self.settings);
@@ -1487,7 +1627,8 @@ impl App {
         // Camera uniform.
         let cam_uniform = self.camera.uniform();
         live.renderer.update_camera(&live.gpu.queue, &cam_uniform);
-        live.renderer.update_params(&live.gpu.queue, &self.render_params);
+        live.renderer
+            .update_params(&live.gpu.queue, &self.render_params);
         if density_now {
             let (vw, vh) = (live.gpu.size.width as f32, live.gpu.size.height as f32);
             live.density.update(&live.gpu.queue, &cam_uniform, vw, vh);
@@ -1496,7 +1637,9 @@ impl App {
         let frame = match live.gpu.surface.get_current_texture() {
             Ok(f) => f,
             Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
-                live.gpu.surface.configure(&live.gpu.device, &live.gpu.config);
+                live.gpu
+                    .surface
+                    .configure(&live.gpu.device, &live.gpu.config);
                 return;
             }
             Err(e) => {
@@ -1504,11 +1647,15 @@ impl App {
                 return;
             }
         };
-        let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let view = frame
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
         let mut enc = live
             .gpu
             .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("draw") });
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("draw"),
+            });
         // Bin nodes into screen tiles before the render pass (same encoder).
         if density_now {
             live.density.record_compute(&mut enc);
@@ -1521,8 +1668,14 @@ impl App {
         let cull_ran = {
             let cull_tw = live.timer.as_ref().and_then(|t| t.cull_writes());
             let (w, h) = (live.gpu.size.width, live.gpu.size.height);
-            live.renderer
-                .encode_edge_prep(&live.gpu.device, &live.gpu.queue, w, h, &mut enc, cull_tw)
+            live.renderer.encode_edge_prep(
+                &live.gpu.device,
+                &live.gpu.queue,
+                w,
+                h,
+                &mut enc,
+                cull_tw,
+            )
         };
         if let Some(t) = live.timer.as_mut() {
             t.set_cull_ran(cull_ran);
@@ -1592,11 +1745,15 @@ impl App {
         self.ui = ui_taken;
 
         // Headless frame limit / screenshot.
-        self.rendered_frames += 1;
+        if self.capture_ready() {
+            self.rendered_frames += 1;
+        }
         if let Some(maxf) = self.opts.max_frames {
             if self.rendered_frames >= maxf {
                 // Fit to the settled layout so the capture frames the real result.
-                self.fit_view();
+                if !self.work.restored_project {
+                    self.fit_view();
+                }
                 self.capture_if_requested();
                 self.should_exit = true;
             }
@@ -1656,6 +1813,10 @@ impl App {
     /// Build owned overlay draw commands (panels + text). Reads only `&self` so
     /// it composes without fighting the borrow checker against the live GPU state.
     fn build_overlay(&self) -> OverlayCmds {
+        self.build_overlay_mode(false)
+    }
+
+    fn build_overlay_mode(&self, clean: bool) -> OverlayCmds {
         let mut c = OverlayCmds::default();
         let vp = self.camera.viewport;
         let scale = (vp.y / 800.0).clamp(1.5, 3.0); // hidpi-aware text size
@@ -1672,7 +1833,11 @@ impl App {
                 (accent, "nebula".to_string()),
                 (
                     white,
-                    format!("{} nodes  {} edges", commafy(self.graph.num_nodes()), commafy(self.graph.num_edges())),
+                    format!(
+                        "{} nodes  {} edges",
+                        commafy(self.graph.num_nodes()),
+                        commafy(self.graph.num_edges())
+                    ),
                 ),
                 (
                     dim,
@@ -1681,7 +1846,11 @@ impl App {
                         self.fps,
                         self.color_mode.label(),
                         self.sim_status(),
-                        if self.density_active() { "   [aggregated]" } else { "" }
+                        if self.density_active() {
+                            "   [aggregated]"
+                        } else {
+                            ""
+                        }
                     ),
                 ),
             ];
@@ -1699,10 +1868,12 @@ impl App {
                     for i in 0..steps {
                         let t = i as f32 / (steps - 1) as f32;
                         let col = coloring::turbo_rgba(t);
-                        c.rects.push((lx + t * bar_w, ly, bar_w / steps as f32 + 1.0, bar_h, col));
+                        c.rects
+                            .push((lx + t * bar_w, ly, bar_w / steps as f32 + 1.0, bar_h, col));
                     }
                     let ts = scale * 0.85;
-                    c.texts.push((lx, ly + bar_h + 3.0, ts, dim, format!("{lo:.3}")));
+                    c.texts
+                        .push((lx, ly + bar_h + 3.0, ts, dim, format!("{lo:.3}")));
                     let hs = format!("{hi:.3}");
                     c.texts.push((
                         lx + bar_w - crate::overlay::Overlay::text_width(&hs, ts),
@@ -1711,13 +1882,14 @@ impl App {
                         dim,
                         hs,
                     ));
-                    c.texts.push((lx, ly - line, scale * 0.9, dim, self.value_name.to_string()));
+                    c.texts
+                        .push((lx, ly - line, scale * 0.9, dim, self.value_name.to_string()));
                 }
             }
         }
 
         // --- Bottom-left controls (hidden when the egui panel is up) ---
-        if self.show_help && !self.show_panel {
+        if self.show_help && !self.show_panel && !clean {
             let help = [
                 "drag pan / scroll zoom / F fit",
                 "click a node to inspect it",
@@ -1732,34 +1904,51 @@ impl App {
             let lines: Vec<(u32, String)> = help.iter().map(|s| (dim, s.to_string())).collect();
             let h = help.len() as f32 * line + 12.0;
             self.panel(&mut c, 10.0, vp.y - h - 10.0, scale, line, panel_bg, &lines);
-        } else if !self.show_panel {
-            c.texts.push((10.0, vp.y - line - 6.0, scale, dim, "H  help".to_string()));
+        } else if !self.show_panel && !clean {
+            c.texts
+                .push((10.0, vp.y - line - 6.0, scale, dim, "H  help".to_string()));
         }
 
-        // --- Node labels (only when few are on screen, to avoid clutter) ---
+        // One label per screen tile at every graph size, with a CPU collision
+        // check so long labels do not overlap adjacent tiles.
         if self.show_labels {
-            if let Some(pos) = self.cached_positions.as_ref() {
-                let lscale = scale * 0.75;
-                let mut visible: Vec<(glam::Vec2, u32)> = Vec::new();
-                for (i, p) in pos.iter().enumerate() {
+            if let Some(live) = &self.live {
+                let mut rects: Vec<(f32, f32, f32, f32)> = Vec::new();
+                for &(id, p) in &live.labels.candidates {
                     let sp = self.camera.world_to_screen(glam::vec2(p[0], p[1]));
-                    if sp.x >= 0.0 && sp.x <= vp.x && sp.y >= 0.0 && sp.y <= vp.y {
-                        visible.push((sp, i as u32));
-                        if visible.len() > 400 {
-                            break; // too many on screen -> skip labels this frame
-                        }
+                    let label = self
+                        .labels
+                        .as_ref()
+                        .and_then(|l| l.get(id as usize))
+                        .cloned()
+                        .unwrap_or_else(|| id.to_string());
+                    let lscale = scale * 0.75;
+                    let label: String = label.chars().take(60).collect();
+                    let width = crate::overlay::Overlay::text_width(&label, lscale);
+                    let height = 8.0 * lscale + 4.0;
+                    let x = if sp.x + 6.0 + width > vp.x - 4.0 {
+                        sp.x - 6.0 - width
+                    } else {
+                        sp.x + 6.0
+                    };
+                    let r = (
+                        x.clamp(4.0, (vp.x - width - 4.0).max(4.0)),
+                        (sp.y - 4.0).clamp(4.0, (vp.y - height - 4.0).max(4.0)),
+                        width,
+                        height,
+                    );
+                    if sp.x < 0.0
+                        || sp.x > vp.x
+                        || sp.y < 0.0
+                        || sp.y > vp.y
+                        || rects.iter().any(|o| {
+                            r.0 < o.0 + o.2 && r.0 + r.2 > o.0 && r.1 < o.1 + o.3 && r.1 + r.3 > o.1
+                        })
+                    {
+                        continue;
                     }
-                }
-                if visible.len() <= 400 {
-                    for (sp, i) in visible {
-                        let label = self
-                            .labels
-                            .as_ref()
-                            .and_then(|l| l.get(i as usize))
-                            .cloned()
-                            .unwrap_or_else(|| i.to_string());
-                        c.texts.push((sp.x + 6.0, sp.y - 4.0, lscale, white, label));
-                    }
+                    rects.push(r);
+                    c.texts.push((r.0, r.1, lscale, white, label));
                 }
             }
         }
@@ -1812,9 +2001,16 @@ impl App {
                 && !self.value_name.is_empty()
                 && !matches!(self.color_mode, ColorMode::Attribute(_))
             {
-                if let Some(v) = self.last_values.as_ref().and_then(|vals| vals.get(id as usize)) {
+                if let Some(v) = self
+                    .last_values
+                    .as_ref()
+                    .and_then(|vals| vals.get(id as usize))
+                {
                     // Integer-valued modes read cleaner without decimals.
-                    if matches!(self.color_mode, ColorMode::Components | ColorMode::Coloring | ColorMode::Communities) {
+                    if matches!(
+                        self.color_mode,
+                        ColorMode::Components | ColorMode::Coloring | ColorMode::Communities
+                    ) {
                         lines.push((white, format!("{} {}", self.value_name, *v as i64)));
                     } else {
                         lines.push((white, format!("{} {:.5}", self.value_name, v)));
@@ -1840,7 +2036,9 @@ impl App {
                 .fold(0.0f32, f32::max);
             let pw = maxw + 20.0;
             let px = vp.x - pw - 10.0;
-            self.panel(&mut c, px, 10.0, scale, line, panel_bg, &lines);
+            if !self.show_panel {
+                self.panel(&mut c, px, 10.0, scale, line, panel_bg, &lines);
+            }
 
             // Connection lines to neighbors + a ring on each neighbor.
             let sp = self.camera.world_to_screen(wp);
@@ -1850,10 +2048,14 @@ impl App {
                 let ns = self.camera.world_to_screen(*np);
                 c.lines.push((sp, ns, 1.5, link));
                 let rr = 5.0;
-                c.rects.push((ns.x - rr, ns.y - rr, 2.0 * rr, 1.5, nbr_ring));
-                c.rects.push((ns.x - rr, ns.y + rr - 1.5, 2.0 * rr, 1.5, nbr_ring));
-                c.rects.push((ns.x - rr, ns.y - rr, 1.5, 2.0 * rr, nbr_ring));
-                c.rects.push((ns.x + rr - 1.5, ns.y - rr, 1.5, 2.0 * rr, nbr_ring));
+                c.rects
+                    .push((ns.x - rr, ns.y - rr, 2.0 * rr, 1.5, nbr_ring));
+                c.rects
+                    .push((ns.x - rr, ns.y + rr - 1.5, 2.0 * rr, 1.5, nbr_ring));
+                c.rects
+                    .push((ns.x - rr, ns.y - rr, 1.5, 2.0 * rr, nbr_ring));
+                c.rects
+                    .push((ns.x + rr - 1.5, ns.y - rr, 1.5, 2.0 * rr, nbr_ring));
             }
 
             // Marker: a bright square outline around the selected node.
@@ -1941,9 +2143,11 @@ impl App {
     /// Render the real scene (graph + overlay) to an offscreen texture matching
     /// the swapchain format and save it as a PNG — so the capture includes the HUD.
     fn save_frame(&mut self, path: &str) {
-        // Refresh the egui panel so captured screenshots include the UI.
-        self.run_ui();
-        let overlay_cmds = self.build_overlay();
+        let clean = self.work.clean_export;
+        if !clean {
+            self.run_ui();
+        }
+        let overlay_cmds = self.build_overlay_mode(clean);
         // Resolve before `live` is borrowed mutably below.
         let density_now = self.density_active();
         let mut ui_taken = self.ui.take();
@@ -1955,15 +2159,22 @@ impl App {
         let (w, h) = (live.gpu.size.width, live.gpu.size.height);
         let format = live.gpu.config.format;
 
-        live.renderer.update_camera(&live.gpu.queue, &self.camera.uniform());
-        live.renderer.update_params(&live.gpu.queue, &self.render_params);
+        live.renderer
+            .update_camera(&live.gpu.queue, &self.camera.uniform());
+        live.renderer
+            .update_params(&live.gpu.queue, &self.render_params);
         if density_now {
-            live.density.update(&live.gpu.queue, &self.camera.uniform(), w as f32, h as f32);
+            live.density
+                .update(&live.gpu.queue, &self.camera.uniform(), w as f32, h as f32);
         }
 
         let tex = live.gpu.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("capture_tex"),
-            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -1975,11 +2186,14 @@ impl App {
         let mut enc = live
             .gpu
             .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("capture") });
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("capture"),
+            });
         if density_now {
             live.density.record_compute(&mut enc);
         }
-        live.renderer.encode_edge_prep(&live.gpu.device, &live.gpu.queue, w, h, &mut enc, None);
+        live.renderer
+            .encode_edge_prep(&live.gpu.device, &live.gpu.queue, w, h, &mut enc, None);
         {
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("capture_pass"),
@@ -1987,7 +2201,12 @@ impl App {
                     view: &view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.015, g: 0.015, b: 0.03, a: 1.0 }),
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 0.015,
+                            g: 0.015,
+                            b: 0.03,
+                            a: 1.0,
+                        }),
                         store: wgpu::StoreOp::Store,
                     },
                     depth_slice: None,
@@ -2011,13 +2230,26 @@ impl App {
             for (x, y, s, col, txt) in &overlay_cmds.texts {
                 live.overlay.text(*x, *y, *s, *col, txt);
             }
-            live.overlay
-                .draw(&live.gpu.device, &live.gpu.queue, (w as f32, h as f32), &mut pass);
+            live.overlay.draw(
+                &live.gpu.device,
+                &live.gpu.queue,
+                (w as f32, h as f32),
+                &mut pass,
+            );
         }
 
         // Composite the egui panel into the capture too.
-        if let (Some(ui), Some(uf)) = (ui_taken.as_mut(), ui_frame.as_ref()) {
-            ui.record(&live.gpu.device, &live.gpu.queue, (w, h), &mut enc, &view, uf);
+        if !clean {
+            if let (Some(ui), Some(uf)) = (ui_taken.as_mut(), ui_frame.as_ref()) {
+                ui.record(
+                    &live.gpu.device,
+                    &live.gpu.queue,
+                    (w, h),
+                    &mut enc,
+                    &view,
+                    uf,
+                );
+            }
         }
 
         live.gpu.queue.submit(Some(enc.finish()));
@@ -2027,7 +2259,12 @@ impl App {
         self.ui = ui_taken;
 
         if let Err(e) = crate::screenshot::save_texture(&live.gpu, &tex, w, h, format, &path) {
-            log::error!("screenshot failed: {e}");
+            if self.opts.max_frames.is_some() {
+                self.work.fatal = Some(format!("Screenshot failed: {e}"));
+            }
+            self.work.error = Some(format!("Screenshot failed: {e}"));
+        } else {
+            self.work.notice = Some(format!("Saved screenshot to {path}"));
         }
     }
 
@@ -2045,10 +2282,21 @@ impl App {
             live.layout.rebind(&live.gpu.device, &live.graph_gpu);
         }
         self.spring_edge_set = self.algo_edge_set;
-        log::info!("force springs now use '{}' edges", self.algo_edge_set_name());
+        log::info!(
+            "force springs now use '{}' edges",
+            self.algo_edge_set_name()
+        );
     }
 
     fn reseed(&mut self, layout: &dyn Layout) {
+        if self.opts.max_frames.is_none() {
+            self.start_layout_job(match layout.name() {
+                "grid" => Seed::Grid,
+                "circle" => Seed::Circle,
+                _ => Seed::Random,
+            });
+            return;
+        }
         self.rebuild_spring_edges();
         let n = self.graph.num_nodes() as usize;
         let mut pos = vec![[0.0f32; 2]; n];
@@ -2070,14 +2318,11 @@ impl App {
 
     /// A `Graph` over the edge set the algorithms should compute on: the union
     /// (`algo_edge_set == None`) or a single edge type. CSR is built.
-    fn algo_graph(&self) -> Graph {
-        let n = self.graph.num_nodes();
-        let mut g = match self.algo_edge_set.and_then(|i| self.edge_types.get(i)) {
-            Some(t) => Graph::new(n, t.edges.clone()),
-            None => Graph::new(n, self.graph.edges().to_vec()),
-        };
-        g.ensure_csr();
-        g
+    fn algo_graph(&self) -> Arc<Graph> {
+        match self.algo_edge_set.and_then(|i| self.edge_types.get(i)) {
+            Some(t) => Arc::new(self.work.document.graph_for_kind(&t.name)),
+            None => self.graph.clone(),
+        }
     }
 
     /// Human name of the current algorithm edge set.
@@ -2113,6 +2358,10 @@ impl App {
 
     /// Hierarchical (layered DAG) layout over the algorithm edge set.
     fn apply_hierarchical(&mut self) {
+        self.start_layout_job(Seed::Hierarchical);
+    }
+
+    fn apply_hierarchical_sync(&mut self) {
         let layout = LayeredLayout {
             target_height: self.opts.k * (self.graph.num_nodes().max(1) as f32).sqrt(),
             aspect: 1.8,
@@ -2124,6 +2373,10 @@ impl App {
 
     /// Radial (concentric) DAG layout over the algorithm edge set.
     fn apply_radial(&mut self) {
+        self.start_layout_job(Seed::Radial);
+    }
+
+    fn apply_radial_sync(&mut self) {
         let layout = RadialLayout {
             radius: self.opts.k * (self.graph.num_nodes().max(1) as f32).sqrt() * 0.6,
             sweeps: 4,
@@ -2137,25 +2390,28 @@ impl App {
     /// cost scales with the neighbor cap, not the graph, so any graph size gets
     /// live neighbor lines.
     fn refresh_selection(&mut self, sel: u32) {
-        const MAX_LINES: usize = 512;
-        let mut indices: Vec<u32> = vec![sel];
-        if let Some(csr) = self.graph.csr_ref() {
-            indices.extend(csr.neighbors(sel).iter().copied().take(MAX_LINES));
+        if self.opts.max_frames.is_none() {
+            self.refresh_selection_async(sel);
+            return;
         }
-        let pos = self
+        let mut indices = vec![sel];
+        indices.extend(self.graph.csr().neighbors(sel).iter().copied().take(512));
+        if let Some(pos) = self
             .live
             .as_ref()
-            .and_then(|live| crate::readback::read_positions_at(&live.gpu, &live.graph_gpu, &indices));
-        if let Some(pos) = pos {
+            .and_then(|l| crate::readback::read_positions_at(&l.gpu, &l.graph_gpu, &indices))
+        {
             self.selected_pos = pos.first().map(|p| glam::vec2(p[0], p[1]));
-            self.neighbor_positions =
-                pos.iter().skip(1).map(|p| glam::vec2(p[0], p[1])).collect();
+            self.neighbor_positions = pos.iter().skip(1).map(|p| glam::vec2(p[0], p[1])).collect();
         }
     }
 
     /// Zoom/center the camera on the selected node and its neighborhood.
     fn focus_selected(&mut self) {
-        let Some(anchor) = self.selected_pos else { return };
+        let Some(anchor) = self.selected_pos else {
+            self.request_focus();
+            return;
+        };
         let mut min = anchor;
         let mut max = anchor;
         for np in &self.neighbor_positions {
@@ -2189,7 +2445,7 @@ impl App {
 
     fn pick_at(&mut self, screen: glam::Vec2) {
         let picked = self.pick_id(screen);
-        self.selected = picked;
+        self.select_node(picked);
         if let Some(id) = picked {
             let deg = self.graph.csr_ref().map(|c| c.degree(id)).unwrap_or(0);
             let label = self
@@ -2206,18 +2462,51 @@ impl App {
 
     fn set_color_mode(&mut self, mode: ColorMode) {
         if self.color_mode != mode {
+            self.record_view_undo();
+            self.mark_dirty();
             self.color_mode = mode;
-            // Categories/ranges differ across modes; drop any highlight + pin.
             self.highlight = None;
             self.pinned_highlight = None;
-            self.apply_color_mode();
-            self.update_title();
         }
+        self.start_color_job();
+        self.update_title();
     }
 
-    fn handle_key(&mut self, code: KeyCode, event_loop: &ActiveEventLoop) {
+    fn handle_key(&mut self, code: KeyCode, _event_loop: &ActiveEventLoop) {
+        if matches!(
+            code,
+            KeyCode::Space
+                | KeyCode::Digit1
+                | KeyCode::Digit2
+                | KeyCode::Digit3
+                | KeyCode::Digit4
+                | KeyCode::Digit5
+                | KeyCode::Digit6
+                | KeyCode::KeyE
+                | KeyCode::KeyN
+                | KeyCode::KeyF
+                | KeyCode::KeyR
+                | KeyCode::KeyG
+                | KeyCode::KeyO
+                | KeyCode::KeyY
+                | KeyCode::KeyU
+                | KeyCode::KeyA
+                | KeyCode::KeyL
+                | KeyCode::KeyC
+                | KeyCode::Equal
+                | KeyCode::Minus
+                | KeyCode::NumpadAdd
+                | KeyCode::NumpadSubtract
+                | KeyCode::BracketLeft
+                | KeyCode::BracketRight
+        ) {
+            self.record_view_undo();
+            self.mark_dirty();
+        }
         match code {
-            KeyCode::Escape => event_loop.exit(),
+            KeyCode::Escape => {
+                self.work.close_requested = true;
+            }
             KeyCode::Space => {
                 self.settings.running = !self.settings.running;
                 if self.settings.running {
@@ -2244,7 +2533,9 @@ impl App {
                 self.reseed(&RandomLayout { extent: ext });
             }
             KeyCode::KeyG => {
-                self.reseed(&GridLayout { spacing: self.opts.k });
+                self.reseed(&GridLayout {
+                    spacing: self.opts.k,
+                });
             }
             KeyCode::KeyO => {
                 let r = self.opts.k * (self.graph.num_nodes().max(1) as f32).sqrt() * 0.5;
@@ -2254,14 +2545,14 @@ impl App {
             KeyCode::KeyU => self.apply_radial(),
             KeyCode::KeyA => {
                 self.show_density = !self.show_density;
-                log::info!("aggregation (density heatmap) {}", if self.show_density { "on" } else { "off" });
+                log::info!(
+                    "aggregation (density heatmap) {}",
+                    if self.show_density { "on" } else { "off" }
+                );
             }
             KeyCode::KeyH => self.show_help = !self.show_help,
             KeyCode::KeyL => {
                 self.show_labels = !self.show_labels;
-                if self.show_labels && self.graph.num_nodes() > 50_000 {
-                    log::info!("labels only render for graphs up to 50k nodes");
-                }
             }
             KeyCode::KeyS => {
                 let path = format!("nebula-{}.png", self.total_steps);
@@ -2274,12 +2565,14 @@ impl App {
                 self.selected_pos = None;
             }
             KeyCode::Equal | KeyCode::NumpadAdd => {
-                self.render_params.base_radius_px = (self.render_params.base_radius_px * 1.3).min(64.0);
+                self.render_params.base_radius_px =
+                    (self.render_params.base_radius_px * 1.3).min(64.0);
                 self.push_params();
                 log::info!("node size: {:.1} px", self.render_params.base_radius_px);
             }
             KeyCode::Minus | KeyCode::NumpadSubtract => {
-                self.render_params.base_radius_px = (self.render_params.base_radius_px / 1.3).max(0.5);
+                self.render_params.base_radius_px =
+                    (self.render_params.base_radius_px / 1.3).max(0.5);
                 self.push_params();
                 log::info!("node size: {:.1} px", self.render_params.base_radius_px);
             }
@@ -2297,18 +2590,28 @@ impl App {
 
     fn push_params(&mut self) {
         if let Some(live) = self.live.as_mut() {
-            live.renderer.update_params(&live.gpu.queue, &self.render_params);
+            live.renderer
+                .update_params(&live.gpu.queue, &self.render_params);
         }
     }
 
     /// Re-fit the camera. For manageable sizes we read positions back from the
     /// GPU for an exact fit; for very large graphs we fit to the world bounds.
     fn fit_view(&mut self) {
-        let Some(live) = self.live.as_ref() else { return };
+        if self.opts.max_frames.is_none() {
+            if let Some(live) = self.live.as_mut() {
+                live.bounds.request(&live.gpu);
+            }
+            return;
+        }
+        let Some(live) = self.live.as_ref() else {
+            return;
+        };
         if self.graph.num_nodes() <= 5_000_000 {
             if let Some(pos) = crate::readback::read_positions(&live.gpu, &live.graph_gpu) {
                 let (min, max) = bounds(&pos);
                 self.camera.fit_bounds(min, max);
+                self.mark_dirty();
                 return;
             }
         }
@@ -2328,13 +2631,19 @@ impl ApplicationHandler for App {
         // Let egui see the event first. If the pointer/keyboard is over a panel
         // and egui wants the event, don't also drive the camera/selection.
         let egui_consumed = if let (Some(ui), Some(live)) = (self.ui.as_mut(), self.live.as_ref()) {
-            ui.state.on_window_event(live.window.as_ref(), &event).consumed
+            ui.state
+                .on_window_event(live.window.as_ref(), &event)
+                .consumed
         } else {
             false
         };
 
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => {
+                self.work.close_requested = true;
+            }
+            WindowEvent::DroppedFile(path) => self.open_path(path),
+            WindowEvent::ModifiersChanged(modifiers) => self.work.modifiers = modifiers.state(),
             WindowEvent::Resized(size) => {
                 if let Some(live) = self.live.as_mut() {
                     live.gpu.resize(size);
@@ -2342,9 +2651,11 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {
-                if !egui_consumed && event.state == ElementState::Pressed {
+                if event.state == ElementState::Pressed {
                     if let PhysicalKey::Code(code) = event.physical_key {
-                        self.handle_key(code, event_loop);
+                        if !self.workspace_shortcut(code) && !egui_consumed {
+                            self.handle_key(code, event_loop);
+                        }
                     }
                 }
             }
@@ -2383,6 +2694,7 @@ impl ApplicationHandler for App {
                 let new = glam::vec2(position.x as f32, position.y as f32);
                 if self.dragging {
                     let delta = new - self.last_cursor;
+                    self.mark_dirty();
                     self.camera.pan_pixels(delta);
                     if (new - self.press_pos).length() > 4.0 {
                         self.moved_since_press = true;
@@ -2398,6 +2710,7 @@ impl ApplicationHandler for App {
                         MouseScrollDelta::PixelDelta(p) => p.y as f32 * 0.02,
                     };
                     let factor = (1.0 + scroll * 0.12).clamp(0.2, 5.0);
+                    self.mark_dirty();
                     self.camera.zoom_about(factor, self.cursor);
                 }
             }
@@ -2461,6 +2774,9 @@ fn attribute_keys(attrs: Option<&[Vec<(String, String)>]>) -> Vec<String> {
 }
 
 fn bounds(pos: &[Pos]) -> (glam::Vec2, glam::Vec2) {
+    if pos.is_empty() {
+        return (glam::vec2(-100.0, -100.0), glam::vec2(100.0, 100.0));
+    }
     let mut min = glam::vec2(f32::MAX, f32::MAX);
     let mut max = glam::vec2(f32::MIN, f32::MIN);
     for p in pos {

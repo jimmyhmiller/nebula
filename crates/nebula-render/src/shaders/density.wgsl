@@ -29,6 +29,7 @@ struct DParams {
 @group(1) @binding(0) var<storage, read> positions: array<vec2<f32>>;
 @group(1) @binding(1) var<storage, read_write> counts: array<atomic<u32>>;
 @group(1) @binding(2) var<storage, read_write> maxcount: array<atomic<u32>>;
+@group(1) @binding(3) var<storage, read> sizes: array<f32>;
 
 fn linear_index(wid: vec3<u32>, nwg: vec3<u32>, lidx: u32) -> u32 {
     let group = wid.x + wid.y * nwg.x + wid.z * nwg.x * nwg.y;
@@ -58,7 +59,7 @@ fn accumulate_density(
     @builtin(local_invocation_index) lidx: u32,
 ) {
     let i = linear_index(wid, nwg, lidx);
-    if (i >= dp.num_nodes) {
+    if (i >= dp.num_nodes || sizes[i] <= 0.0) {
         return;
     }
     let world = positions[i];

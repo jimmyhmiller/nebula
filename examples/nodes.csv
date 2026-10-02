@@ -1,0 +1,6 @@
+id,label,team,critical
+web,Web app,product,true
+api,API server,platform,true
+db,Database,platform,true
+worker,Background worker,platform,false
+unused,Isolated service,product,false

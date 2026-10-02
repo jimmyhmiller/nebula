@@ -130,6 +130,7 @@ fn clip_edge(e: u32) -> ClippedEdge {
     }
     let ia = edges[e * 2u];
     let ib = edges[e * 2u + 1u];
+    if ((colors[ia] >> 24u) == 0u || (colors[ib] >> 24u) == 0u) { return out; }
     let na = (positions[ia] - cam.center) * cam.scale;
     let nb = (positions[ib] - cam.center) * cam.scale;
     let wf = f32(dims.w);

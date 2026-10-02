@@ -10,6 +10,12 @@ concrete column is **N = 1e9, d = 4** (so `E = 2e9`, `2E = 4e9`).
 Types are taken from the code: GPU buffers in `crates/nebula-render/src/scene.rs`,
 CPU buffers in `crates/nebula-core/src/graph.rs`.
 
+## Desktop document overhead
+
+The accounting below describes the original graph/layout engine and its steady-state buffers. The desktop document layer additionally retains stable IDs, labels, typed node/edge attributes, edge direction/weights and an incidence index for relationship inspection. A directed/weighted graph may also cache outgoing and incoming adjacency, in addition to the weak adjacency used for physics. Metadata costs depend on string lengths, attributes and relationship types. Import, project snapshots, undo, and export introduce transient allocations. The original ~104 GB estimate is **not a current whole-application peak-memory estimate**.
+
+Per-thread CSR histograms have been removed; adjacency construction now uses one histogram/offset array and bounded O(N + E) scratch independent of worker count. GPU upload limits and estimated available memory are checked by the desktop workflow. These checks do not make a billion-node graph practical with rich metadata; the reduction opportunities below still apply to the engine.
+
 ## GPU buffers (unified memory)
 
 | Part | Element | Count | B/elem | Formula | @1e9, d=4 | Optimal? |

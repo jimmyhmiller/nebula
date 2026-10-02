@@ -42,6 +42,8 @@ struct DrawArgs {
 // exclusive offsets (in visible-edge units); pass 3 reads the offsets.
 @group(0) @binding(5) var<storage, read_write> chunk_counts: array<u32>;
 
+@group(0) @binding(6) var<storage, read> colors: array<u32>;
+
 const WG: u32 = 256u;
 const PER_THREAD: u32 = 16u;
 const CHUNK: u32 = 4096u; // WG * PER_THREAD
@@ -55,6 +57,7 @@ fn num_edges() -> u32 {
 fn edge_visible(e: u32) -> bool {
     let a = edges[e * 2u];
     let b = edges[e * 2u + 1u];
+    if ((colors[a] >> 24u) == 0u || (colors[b] >> 24u) == 0u) { return false; }
     let pa = (positions[a] - cam.center) * cam.scale;
     let pb = (positions[b] - cam.center) * cam.scale;
     return !((pa.x < -1.0 && pb.x < -1.0) || (pa.x > 1.0 && pb.x > 1.0) ||

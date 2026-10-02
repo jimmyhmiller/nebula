@@ -1,0 +1,4 @@
+source,target,weight,type,description
+web,api,10,calls,"HTTPS, internal"
+api,db,5,reads,query
+worker,db,2,writes,batch processing

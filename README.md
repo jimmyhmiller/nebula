@@ -22,6 +22,14 @@ right.
 cargo run --release -p nebula-app -- --blocks 40000 6 300000 --color communities
 ```
 
+## Desktop workflow
+
+Run without arguments for a welcome screen with file opening, drag/drop, recent files, and a sample graph. Open JSON, CSV/TSV, static GraphML or GEXF, map table columns, and review the import before replacing the current graph. Search original IDs/labels/attributes, browse incoming/outgoing neighbors and relationship metadata, combine filters, and isolate neighborhoods.
+
+Save `.nebula` projects to retain positions, camera, filters, selection and appearance. Unsaved sessions have periodic recovery snapshots. Undo/redo restores layouts and view controls. Export clean PNGs or metadata-preserving graph/subgraph JSON. Import, CPU algorithms, fixed layouts, search and file writes run in background jobs; save/selection readbacks are asynchronous. The GPU fits visible nodes and samples labels at every graph size.
+
+See the [user guide](docs/USER_GUIDE.md), [JSON format](docs/JSON_FORMAT.md), and [example service map](examples/service-map.json).
+
 ## What it does
 
 - **GPU force-directed layout that converges and stops.** A Fruchterman–Reingold
@@ -64,8 +72,8 @@ cargo run --release -p nebula-app -- --blocks 40000 6 300000 --color communities
 - **Pluggable layouts.** A `Layout` trait with random / circle / grid / force-
   directed implementations; re-seed at runtime with `R` / `G` / `O`.
 - **In-engine HUD.** Stats, controls, a color legend, and the inspection panel are
-  drawn with an embedded 8×8 bitmap font — no UI toolkit, one wgpu version, ~zero
-  extra dependencies.
+  drawn with an embedded 8×8 bitmap font, alongside an egui desktop interface
+  with file workflows, search, filtering, metadata inspection and project persistence.
 
 ## Install / run
 
@@ -86,14 +94,14 @@ cargo run --release -p nebula-app -- [GENERATOR] [OPTIONS]
 | `--geo N R` | Random geometric: N nodes, connect within radius R∈(0,1) |
 | `--file PATH` | Load a graph file (format auto-detected) |
 
-Default (no generator): `--ba 50000 3`.
+Default (no generator): the desktop welcome screen. Headless `--frames` runs without a generator still use `--ba 50000 3`.
 
 ### Options
 
 `--color MODE` (`uniform`/`components`/`degree`/`pagerank`/`coloring`/`communities`),
 `--k FLOAT` (optimal edge length), `--seed N`, `--dt F`, `--substeps N`
 (sim steps per frame), `--paused`, `--no-edges`, `--no-nodes`,
-`--frames N` + `--screenshot PATH` (headless capture), `--select INDEX`,
+`-o PATH` / `--output PATH` (batch PNG, default 300 frames), `--frames N` (override budget), `--select INDEX`,
 `--help-overlay`.
 
 ### Controls
@@ -128,8 +136,11 @@ cargo run --release -p nebula-app -- --geo 30000 0.015
 # Load a real graph (SNAP/Konect edge lists, .mtx, .gml, .dot, .json, ...)
 cargo run --release -p nebula-app -- --file mygraph.mtx --color components
 
-# Headless render to a PNG
-cargo run --release -p nebula-app -- --ba 100000 3 --frames 500 --screenshot out.png
+# Render a file to a PNG and exit
+cargo run --release -p nebula-app -- graph.json -o graph.png
+
+# Choose the frame budget for a larger generated layout
+cargo run --release -p nebula-app -- --ba 100000 3 --frames 500 -o out.png
 ```
 
 ## Architecture

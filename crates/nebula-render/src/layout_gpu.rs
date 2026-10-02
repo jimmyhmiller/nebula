@@ -34,7 +34,7 @@ pub struct LayoutParams {
 }
 
 /// Tunable physics knobs surfaced to the UI.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct LayoutSettings {
     pub k: f32,
     pub repulsion: f32,
@@ -386,14 +386,34 @@ impl LayoutGpu {
         // scan stage reads what the previous one wrote, so they cannot merge.
         let nblocks0 = cells.div_ceil(256);
         let block_groups = dispatch_dims(nblocks0.div_ceil(256));
-        self.pass(encoder, &self.scan_cells_pipeline, cell_groups, "scan_cells");
-        self.pass(encoder, &self.scan_sums0_pipeline, block_groups, "scan_sums0");
+        self.pass(
+            encoder,
+            &self.scan_cells_pipeline,
+            cell_groups,
+            "scan_cells",
+        );
+        self.pass(
+            encoder,
+            &self.scan_sums0_pipeline,
+            block_groups,
+            "scan_sums0",
+        );
         // Level 1 is at most 256 entries, so a single workgroup finishes it.
         self.pass(encoder, &self.scan_sums1_pipeline, (1, 1, 1), "scan_sums1");
         self.pass(encoder, &self.add_sums0_pipeline, block_groups, "add_sums0");
         self.pass(encoder, &self.add_cells_pipeline, cell_groups, "add_cells");
-        self.pass(encoder, &self.init_cursor_pipeline, cell_groups, "init_cursor");
-        self.pass(encoder, &self.scatter_pipeline, node_groups, "scatter_nodes");
+        self.pass(
+            encoder,
+            &self.init_cursor_pipeline,
+            cell_groups,
+            "init_cursor",
+        );
+        self.pass(
+            encoder,
+            &self.scatter_pipeline,
+            node_groups,
+            "scatter_nodes",
+        );
 
         self.pass(encoder, &self.pyr_l0_pipeline, cell_groups, "build_pyr_l0");
         // Reduce the pyramid one level at a time (each pass reads the previous).
@@ -459,16 +479,46 @@ fn make_data_bg(
         label: Some("layout_data_bg"),
         layout,
         entries: &[
-            wgpu::BindGroupEntry { binding: 0, resource: graph.positions.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 1, resource: graph.velocities.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 2, resource: graph.csr_offsets.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 3, resource: graph.csr_targets.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 4, resource: graph.grid_counts.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 5, resource: graph.node_order.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 6, resource: graph.pyr.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 7, resource: graph.cell_starts.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 8, resource: graph.cell_cursor.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 9, resource: graph.scan_sums.as_entire_binding() },
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: graph.positions.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: graph.velocities.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: graph.csr_offsets.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: graph.csr_targets.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: graph.grid_counts.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 5,
+                resource: graph.node_order.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 6,
+                resource: graph.pyr.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 7,
+                resource: graph.cell_starts.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 8,
+                resource: graph.cell_cursor.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 9,
+                resource: graph.scan_sums.as_entire_binding(),
+            },
         ],
     })
 }
@@ -490,7 +540,10 @@ mod tests {
             s.alpha_decay
         );
         let steps = s.steps_to_settle();
-        assert!((360..=372).contains(&steps), "expected ~366 steps, got {steps}");
+        assert!(
+            (360..=372).contains(&steps),
+            "expected ~366 steps, got {steps}"
+        );
     }
 
     /// The whole point: a bigger graph must get proportionally more steps, so it
@@ -505,7 +558,10 @@ mod tests {
         // 100x the nodes is 10x the linear extent, so ~10x the steps.
         let (small, big) = (budget(50_000), budget(5_000_000));
         let ratio = big / small;
-        assert!((9.0..=11.0).contains(&ratio), "expected ~10x budget, got {ratio}x");
+        assert!(
+            (9.0..=11.0).contains(&ratio),
+            "expected ~10x budget, got {ratio}x"
+        );
         // Monotonic, and never zero for a degenerate graph.
         assert!(budget(1) >= 1.0);
         assert!(budget(1_000_000) > budget(100_000));
@@ -517,12 +573,18 @@ mod tests {
         let mut s = LayoutSettings::default();
         s.set_cooling_for(1_000_000);
         let start = s.steps_to_settle();
-        assert!(start > 1_000, "1M nodes should get a long budget, got {start}");
+        assert!(
+            start > 1_000,
+            "1M nodes should get a long budget, got {start}"
+        );
         // Simulate the decay and check the estimate tracks it.
         for _ in 0..start {
             s.alpha *= 1.0 - s.alpha_decay;
         }
-        assert!(s.alpha <= s.alpha_min, "alpha should have reached alpha_min");
+        assert!(
+            s.alpha <= s.alpha_min,
+            "alpha should have reached alpha_min"
+        );
         assert_eq!(s.steps_to_settle(), 0);
     }
 }

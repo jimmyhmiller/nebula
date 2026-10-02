@@ -39,6 +39,11 @@ memmap2 = "0.9"
 half = { version = "2", features = ["bytemuck"] }
 png = "0.17"
 serde_json = "1"
+serde = { version = "1", features = ["derive", "rc"] }
+csv = "1"
+roxmltree = "0.20"
+rfd = "0.15"
+sysinfo = "0.37"
 
 nebula-core = { path = "crates/nebula-core" }
 nebula-layout = { path = "crates/nebula-layout" }

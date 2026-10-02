@@ -11,7 +11,7 @@ use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
 
 #[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
+#[derive(Clone, Copy, Pod, Zeroable, serde::Serialize, serde::Deserialize)]
 pub struct RenderParams {
     pub base_radius_px: f32,
     pub min_radius_px: f32,
@@ -211,12 +211,22 @@ impl Renderer {
         };
         let graph_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("graph_bgl"),
-            entries: &[ro_storage(0), ro_storage(1), ro_storage(2), ro_storage(3), edge_style_entry],
+            entries: &[
+                ro_storage(0),
+                ro_storage(1),
+                ro_storage(2),
+                ro_storage(3),
+                edge_style_entry,
+            ],
         });
         // Default edge style (node-colored) for the node/base bind group.
         let default_edge_style = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("default_edge_style"),
-            contents: bytemuck::bytes_of(&EdgeStyle { color: [0.0; 4], mode: 0, _pad: [0; 3] }),
+            contents: bytemuck::bytes_of(&EdgeStyle {
+                color: [0.0; 4],
+                mode: 0,
+                _pad: [0; 3],
+            }),
             usage: wgpu::BufferUsages::UNIFORM,
         });
 
@@ -224,19 +234,40 @@ impl Renderer {
             label: Some("view_bg"),
             layout: &view_bgl,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: camera_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: params_buf.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: camera_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: params_buf.as_entire_binding(),
+                },
             ],
         });
         let graph_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("graph_bg"),
             layout: &graph_bgl,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: graph.positions.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: graph.colors.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: graph.sizes.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 3, resource: graph.edges.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 4, resource: default_edge_style.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: graph.positions.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: graph.colors.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: graph.sizes.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: graph.edges.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: default_edge_style.as_entire_binding(),
+                },
             ],
         });
 
@@ -398,6 +429,7 @@ impl Renderer {
                 rw_storage(3),
                 rw_storage(4),
                 rw_storage(5),
+                cull_ro(6),
             ],
         });
         let cull_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -663,7 +695,12 @@ impl Renderer {
         });
         // Worst-case pairs for the largest edge type in one batch; a batch
         // never needs more than max_edges * (tiles_x + tiles_y + 1).
-        let max_edges = self.edge_types.iter().map(|t| t.num_edges as u64).max().unwrap_or(0);
+        let max_edges = self
+            .edge_types
+            .iter()
+            .map(|t| t.num_edges as u64)
+            .max()
+            .unwrap_or(0);
         let max_tiles_per_edge = (tiles_x + tiles_y + 1) as u64;
         let pairs_cap = (max_edges * max_tiles_per_edge).clamp(1, PAIRS_CAP);
         let pairs = device.create_buffer(&wgpu::BufferDescriptor {
@@ -682,11 +719,26 @@ impl Renderer {
             label: Some("edge_accum_raster_bg"),
             layout: &self.raster_accum_bgl,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: dims.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: tile_counts.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 3, resource: tile_offsets.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 4, resource: pairs.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: dims.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: tile_counts.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: tile_offsets.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: pairs.as_entire_binding(),
+                },
                 wgpu::BindGroupEntry {
                     binding: 5,
                     resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
@@ -701,8 +753,14 @@ impl Renderer {
             label: Some("edge_accum_resolve_bg"),
             layout: &self.resolve_bgl,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: dims.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: buf.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: dims.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: buf.as_entire_binding(),
+                },
             ],
         });
         self.accum = Some(AccumGpu {
@@ -761,8 +819,8 @@ impl Renderer {
         // Plan batches: (edge type index, start, count) with per-batch pair
         // demand bounded by the pair scratch.
         let max_tiles_per_edge = (accum.tiles_x + accum.tiles_y + 1) as u64;
-        let batch_edges = u32::try_from((accum.pairs_cap / max_tiles_per_edge).max(1))
-            .unwrap_or(u32::MAX);
+        let batch_edges =
+            u32::try_from((accum.pairs_cap / max_tiles_per_edge).max(1)).unwrap_or(u32::MAX);
         let mut plan: Vec<(usize, u32, u32)> = Vec::new();
         for (ti, et) in self.edge_types.iter().enumerate() {
             if !(et.visible && et.num_edges > 0) {
@@ -874,9 +932,7 @@ impl Renderer {
     /// Node colors are baked into the compute-raster accumulation; call this
     /// after rewriting the color buffer so the raster path re-draws.
     pub fn mark_colors_dirty(&mut self) {
-        if self.edge_raster {
-            self.cull_dirty = true;
-        }
+        self.cull_dirty = true;
     }
 
     /// Pick the node under a cursor pixel by rendering node ids to an R32Uint
@@ -900,7 +956,11 @@ impl Renderer {
 
         let tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("pick_tex"),
-            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -910,7 +970,9 @@ impl Renderer {
         });
         let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
 
-        let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("pick") });
+        let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("pick"),
+        });
         {
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("pick_pass"),
@@ -955,7 +1017,11 @@ impl Renderer {
                     rows_per_image: Some(1),
                 },
             },
-            wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
         );
         queue.submit(Some(enc.finish()));
 
@@ -980,7 +1046,12 @@ impl Renderer {
 
     /// Upload the edge types (buffers + per-type bind groups). Replaces any
     /// previously set types.
-    pub fn set_edge_types(&mut self, device: &wgpu::Device, graph: &GpuGraph, specs: &[EdgeTypeInput]) {
+    pub fn set_edge_types(
+        &mut self,
+        device: &wgpu::Device,
+        graph: &GpuGraph,
+        specs: &[EdgeTypeInput],
+    ) {
         self.edge_types.clear();
         self.cull_dirty = true;
         // The pair scratch is sized from the largest edge type; rebuild the
@@ -1011,18 +1082,37 @@ impl Renderer {
             };
             let style_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("edge_style_buf"),
-                contents: bytemuck::bytes_of(&EdgeStyle { color, mode, _pad: [0; 3] }),
+                contents: bytemuck::bytes_of(&EdgeStyle {
+                    color,
+                    mode,
+                    _pad: [0; 3],
+                }),
                 usage: wgpu::BufferUsages::UNIFORM,
             });
             let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("edge_type_bg"),
                 layout: &self.graph_bgl,
                 entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: graph.positions.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 1, resource: graph.colors.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 2, resource: graph.sizes.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 3, resource: edge_buf.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 4, resource: style_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: graph.positions.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: graph.colors.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: graph.sizes.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: edge_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: style_buf.as_entire_binding(),
+                    },
                 ],
             });
 
@@ -1051,12 +1141,31 @@ impl Renderer {
                 label: Some("edge_cull_bg"),
                 layout: &self.cull_bgl,
                 entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: self.camera_buf.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 1, resource: graph.positions.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 2, resource: edge_buf.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 3, resource: compact.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 4, resource: indirect.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 5, resource: chunk_counts.as_entire_binding() },
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: self.camera_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: graph.positions.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: edge_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: compact.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: indirect.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: chunk_counts.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {binding:6,resource:graph.colors.as_entire_binding()},
                 ],
             });
 
@@ -1064,12 +1173,30 @@ impl Renderer {
                 label: Some("edge_raster_bg"),
                 layout: &self.raster_bgl,
                 entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: self.camera_buf.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 1, resource: self.params_buf.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 2, resource: graph.positions.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 3, resource: graph.colors.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 4, resource: edge_buf.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 5, resource: style_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: self.camera_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: self.params_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: graph.positions.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: graph.colors.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: edge_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: style_buf.as_entire_binding(),
+                    },
                 ],
             });
 

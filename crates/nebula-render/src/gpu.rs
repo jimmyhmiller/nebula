@@ -9,6 +9,7 @@ use std::sync::Arc;
 use winit::window::Window;
 
 pub struct Gpu {
+    pub errors: std::sync::mpsc::Receiver<String>,
     pub instance: wgpu::Instance,
     pub surface: wgpu::Surface<'static>,
     pub adapter: wgpu::Adapter,
@@ -40,7 +41,12 @@ impl Gpu {
             .map_err(|e| anyhow!("no suitable GPU adapter: {e}"))?;
 
         let info = adapter.get_info();
-        log::info!("GPU: {} ({:?}, {:?})", info.name, info.device_type, info.backend);
+        log::info!(
+            "GPU: {} ({:?}, {:?})",
+            info.name,
+            info.device_type,
+            info.backend
+        );
 
         // Ask for everything the hardware allows.
         let adapter_limits = adapter.limits();
@@ -53,8 +59,7 @@ impl Gpu {
 
         // Timestamp queries (GPU pass timing) are optional — request only if
         // the adapter has them.
-        let features =
-            adapter.features() & wgpu::Features::TIMESTAMP_QUERY;
+        let features = adapter.features() & wgpu::Features::TIMESTAMP_QUERY;
 
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
@@ -68,6 +73,18 @@ impl Gpu {
             .await
             .map_err(|e| anyhow!("request_device failed: {e}"))?;
 
+        let (error_tx, errors) = std::sync::mpsc::channel();
+        let lost_tx = error_tx.clone();
+        device.on_uncaptured_error(Arc::new(move |error: wgpu::Error| {
+            let _ = error_tx.send(format!(
+                "GPU operation failed: {error}. Save your work and restart Nebula."
+            ));
+        }));
+        device.set_device_lost_callback(move |reason, message| {
+            let _ = lost_tx.send(format!(
+                "GPU device was lost ({reason:?}): {message}. Restart Nebula."
+            ));
+        });
         let surface_caps = surface.get_capabilities(&adapter);
         // Prefer a non-sRGB-view we manage ourselves; use the first (usually
         // preferred) format. Rendering assumes linear-ish; good enough for a viewer.
@@ -91,6 +108,7 @@ impl Gpu {
         surface.configure(&device, &config);
 
         Ok(Gpu {
+            errors,
             instance,
             surface,
             adapter,

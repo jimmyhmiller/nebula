@@ -14,6 +14,11 @@ bytemuck.workspace = true
 memmap2.workspace = true
 log.workspace = true
 serde_json.workspace = true
+serde.workspace = true
+csv.workspace = true
+roxmltree.workspace = true
+
+sysinfo.workspace = true
 
 [dev-dependencies]
 env_logger.workspace = true

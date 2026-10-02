@@ -6,6 +6,7 @@
 //! zero reshaping.
 
 pub mod algorithms;
+pub mod document;
 pub mod formats;
 pub mod generate;
 pub mod graph;

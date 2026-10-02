@@ -9,27 +9,36 @@
 //! are `u64` because a billion-node graph with a modest average degree easily
 //! exceeds 4B directed entries.
 
-use rayon::prelude::*;
+use std::sync::OnceLock;
 
 pub type NodeId = u32;
 
 /// An undirected graph stored as a flat edge list, with a lazily-built CSR.
+#[derive(Clone)]
 pub struct Graph {
     num_nodes: u64,
     /// Canonical undirected edge list — each edge stored once.
     edges: Vec<[NodeId; 2]>,
     /// Cached CSR adjacency (built on demand). Directed doubling of `edges`.
-    csr: Option<Csr>,
+    csr: OnceLock<Csr>,
+    directions: Vec<bool>,
+    weights: Vec<f32>,
+    outgoing: OnceLock<Csr>,
+    incoming: OnceLock<Csr>,
+    has_direction: bool,
+    has_weight: bool,
 }
 
 /// Compressed-sparse-row adjacency. For an undirected graph each edge appears
 /// twice (once per endpoint) so neighbor iteration is symmetric.
+#[derive(Clone)]
 pub struct Csr {
     /// `offsets[i]..offsets[i+1]` indexes into `targets` for node `i`.
     /// Length `num_nodes + 1`.
     pub offsets: Vec<u64>,
     /// Concatenated neighbor lists. Length = 2 * num_edges (undirected).
     pub targets: Vec<NodeId>,
+    pub weights: Vec<f32>,
 }
 
 impl Csr {
@@ -48,12 +57,22 @@ impl Csr {
 
 impl Graph {
     pub fn new(num_nodes: u64, edges: Vec<[NodeId; 2]>) -> Self {
-        Graph { num_nodes, edges, csr: None }
+        Graph {
+            num_nodes,
+            edges,
+            csr: OnceLock::new(),
+            directions: Vec::new(),
+            weights: Vec::new(),
+            outgoing: OnceLock::new(),
+            incoming: OnceLock::new(),
+            has_direction: false,
+            has_weight: false,
+        }
     }
 
     /// An empty graph with `num_nodes` isolated vertices.
     pub fn empty(num_nodes: u64) -> Self {
-        Graph { num_nodes, edges: Vec::new(), csr: None }
+        Self::new(num_nodes, Vec::new())
     }
 
     #[inline]
@@ -78,16 +97,58 @@ impl Graph {
 
     /// Build (or return cached) CSR adjacency. Parallel counting-sort style
     /// construction: O(N + E) work, scales across cores.
-    pub fn csr(&mut self) -> &Csr {
-        if self.csr.is_none() {
-            self.csr = Some(build_csr(self.num_nodes, &self.edges));
-        }
-        self.csr.as_ref().unwrap()
+    pub fn csr(&self) -> &Csr {
+        self.csr
+            .get_or_init(|| build_csr(self.num_nodes, &self.edges))
     }
 
-    /// Borrow an already-built CSR without mutation, if present.
     pub fn csr_ref(&self) -> Option<&Csr> {
-        self.csr.as_ref()
+        self.csr.get()
+    }
+
+    pub fn with_metadata(
+        num_nodes: u64,
+        edges: Vec<[NodeId; 2]>,
+        directions: Vec<bool>,
+        weights: Vec<f32>,
+    ) -> Self {
+        assert_eq!(edges.len(), directions.len());
+        assert_eq!(edges.len(), weights.len());
+        let mut g = Self::new(num_nodes, edges);
+        g.has_direction = directions.iter().any(|v| *v);
+        g.has_weight = weights.iter().any(|v| *v != 1.0);
+        g.directions = directions;
+        g.weights = weights;
+        g
+    }
+
+    pub fn outgoing(&self) -> &Csr {
+        if !self.has_direction && !self.has_weight {
+            return self.csr();
+        }
+        self.outgoing.get_or_init(|| {
+            build_adjacency(
+                self.num_nodes,
+                &self.edges,
+                &self.directions,
+                &self.weights,
+                false,
+            )
+        })
+    }
+    pub fn incoming(&self) -> &Csr {
+        if !self.has_direction {
+            return self.outgoing();
+        }
+        self.incoming.get_or_init(|| {
+            build_adjacency(
+                self.num_nodes,
+                &self.edges,
+                &self.directions,
+                &self.weights,
+                true,
+            )
+        })
     }
 
     /// Build a fresh CSR without caching it (useful when a consumer wants to own
@@ -96,7 +157,7 @@ impl Graph {
         build_csr(self.num_nodes, &self.edges)
     }
 
-    pub fn ensure_csr(&mut self) {
+    pub fn ensure_csr(&self) {
         let _ = self.csr();
     }
 
@@ -114,62 +175,56 @@ impl Graph {
 
 /// Parallel CSR construction from an undirected edge list.
 fn build_csr(num_nodes: u64, edges: &[[NodeId; 2]]) -> Csr {
+    build_adjacency(num_nodes, edges, &[], &[], false)
+}
+
+// One histogram, independent of thread count: bounded O(N + E) scratch memory.
+fn build_adjacency(
+    num_nodes: u64,
+    edges: &[[NodeId; 2]],
+    directed: &[bool],
+    weights: &[f32],
+    reverse: bool,
+) -> Csr {
     let n = num_nodes as usize;
-
-    // 1. Degree histogram (undirected: count both endpoints).
-    //    Use per-chunk local histograms then reduce, to stay lock-free.
-    let num_threads = rayon::current_num_threads().max(1);
-    let chunk = edges.len().div_ceil(num_threads).max(1);
-    let partials: Vec<Vec<u64>> = edges
-        .par_chunks(chunk)
-        .map(|c| {
-            let mut local = vec![0u64; n];
-            for &[a, b] in c {
-                local[a as usize] += 1;
-                local[b as usize] += 1;
-            }
-            local
-        })
-        .collect();
-
-    let mut degree = vec![0u64; n];
-    // Reduce partial histograms in parallel over node ranges.
-    degree
-        .par_iter_mut()
-        .enumerate()
-        .for_each(|(i, d)| {
-            let mut sum = 0u64;
-            for p in &partials {
-                sum += p[i];
-            }
-            *d = sum;
-        });
-
-    // 2. Prefix sum -> offsets (length n+1). Sequential scan (fast, O(N)).
     let mut offsets = vec![0u64; n + 1];
-    let mut acc = 0u64;
+    for (i, &[a, b]) in edges.iter().enumerate() {
+        let (a, b) = if reverse { (b, a) } else { (a, b) };
+        offsets[a as usize + 1] += 1;
+        if !directed.get(i).copied().unwrap_or(false) {
+            offsets[b as usize + 1] += 1;
+        }
+    }
     for i in 0..n {
-        offsets[i] = acc;
-        acc += degree[i];
+        offsets[i + 1] += offsets[i];
     }
-    offsets[n] = acc;
-
-    // 3. Scatter targets. Use a per-node cursor initialized to offsets.
-    //    Sequential scatter (random writes; parallelizing needs atomics and
-    //    rarely helps due to memory bandwidth). Cursor is a moving write head.
-    let total = acc as usize;
-    let mut targets = vec![0u32; total];
-    let mut cursor: Vec<u64> = offsets[..n].to_vec();
-    for &[a, b] in edges {
-        let ia = cursor[a as usize];
-        targets[ia as usize] = b;
-        cursor[a as usize] = ia + 1;
-        let ib = cursor[b as usize];
-        targets[ib as usize] = a;
-        cursor[b as usize] = ib + 1;
+    let mut targets = vec![0; offsets[n] as usize];
+    let mut arc_weights = if weights.is_empty() {
+        Vec::new()
+    } else {
+        vec![1.0; targets.len()]
+    };
+    let mut cursor = offsets[..n].to_vec();
+    for (i, &[a, b]) in edges.iter().enumerate() {
+        let (a, b) = if reverse { (b, a) } else { (a, b) };
+        let mut insert = |source: u32, target: u32| {
+            let j = cursor[source as usize] as usize;
+            targets[j] = target;
+            if !arc_weights.is_empty() {
+                arc_weights[j] = weights[i];
+            }
+            cursor[source as usize] += 1;
+        };
+        insert(a, b);
+        if !directed.get(i).copied().unwrap_or(false) {
+            insert(b, a);
+        }
     }
-
-    Csr { offsets, targets }
+    Csr {
+        offsets,
+        targets,
+        weights: arc_weights,
+    }
 }
 
 #[cfg(test)]

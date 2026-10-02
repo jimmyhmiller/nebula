@@ -113,6 +113,7 @@ impl Density {
                 storage(0, wgpu::ShaderStages::COMPUTE, true),  // positions
                 storage(1, wgpu::ShaderStages::COMPUTE, false), // counts (atomic)
                 storage(2, wgpu::ShaderStages::COMPUTE, false), // max (atomic)
+                storage(3, wgpu::ShaderStages::COMPUTE, true), // visibility/sizes
             ],
         });
         // Render layouts.
@@ -143,6 +144,7 @@ impl Density {
                 wgpu::BindGroupEntry { binding: 0, resource: graph.positions.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 1, resource: counts_buf.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 2, resource: max_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: graph.sizes.as_entire_binding() },
             ],
         });
         let render_view_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {

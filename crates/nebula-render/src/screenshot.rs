@@ -27,7 +27,9 @@ pub fn save_texture(
     });
     let mut enc = gpu
         .device
-        .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("tex_readback_enc") });
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("tex_readback_enc"),
+        });
     enc.copy_texture_to_buffer(
         wgpu::TexelCopyTextureInfo {
             texture: tex,
@@ -43,7 +45,11 @@ pub fn save_texture(
                 rows_per_image: Some(height),
             },
         },
-        wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
     );
     gpu.queue.submit(Some(enc.finish()));
 
@@ -53,7 +59,8 @@ pub fn save_texture(
         let _ = tx.send(r);
     });
     let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
-    rx.recv().ok();
+    rx.recv()
+        .map_err(|e| anyhow::anyhow!("Image readback failed: {e}"))??;
     let data = slice.get_mapped_range();
 
     let mut rgba = vec![0u8; (unpadded * height) as usize];

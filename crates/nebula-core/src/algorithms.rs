@@ -62,9 +62,9 @@ pub fn count_components(labels: &[u32]) -> usize {
 }
 
 /// BFS distance from `source`. Unreachable nodes get `u32::MAX`.
-pub fn bfs_distances(g: &mut Graph, source: NodeId) -> Vec<u32> {
+pub fn bfs_distances(g: &Graph, source: NodeId) -> Vec<u32> {
     let n = g.num_nodes() as usize;
-    let csr = g.csr();
+    let csr = g.outgoing();
     let mut dist = vec![u32::MAX; n];
     dist[source as usize] = 0;
     let mut frontier = vec![source];
@@ -87,32 +87,49 @@ pub fn bfs_distances(g: &mut Graph, source: NodeId) -> Vec<u32> {
 
 /// PageRank (undirected treated as symmetric). `iters` power iterations,
 /// `damping` typically 0.85. Returns a normalized rank per node.
-pub fn pagerank(g: &mut Graph, iters: u32, damping: f32) -> Vec<f32> {
+pub fn pagerank(g: &Graph, iters: u32, damping: f32) -> Vec<f32> {
     let n = g.num_nodes() as usize;
-    let csr = g.csr();
+    if n == 0 {
+        return Vec::new();
+    }
+    let incoming = g.incoming();
+    let outgoing = g.outgoing();
     let inv_n = 1.0 / n as f32;
     let mut rank = vec![inv_n; n];
     let mut next = vec![0f32; n];
-    let deg: Vec<u32> = (0..n as u32).map(|i| csr.degree(i)).collect();
+    let degree: Vec<f64> = (0..n)
+        .map(|i| {
+            let start = outgoing.offsets[i] as usize;
+            let end = outgoing.offsets[i + 1] as usize;
+            if outgoing.weights.is_empty() {
+                (end - start) as f64
+            } else {
+                outgoing.weights[start..end].iter().map(|w| *w as f64).sum()
+            }
+        })
+        .collect();
 
     for _ in 0..iters {
         let base = (1.0 - damping) * inv_n;
         // Scatter contributions: parallel over target nodes by gathering from
         // neighbors (pull model — race-free).
         next.par_iter_mut().enumerate().for_each(|(i, out)| {
-            let mut acc = 0f32;
-            for &v in csr.neighbors(i as NodeId) {
-                let dv = deg[v as usize];
-                if dv > 0 {
-                    acc += rank[v as usize] / dv as f32;
+            let mut acc = 0f64;
+            let start = incoming.offsets[i] as usize;
+            let end = incoming.offsets[i + 1] as usize;
+            for j in start..end {
+                let v = incoming.targets[j] as usize;
+                let weight = incoming.weights.get(j).copied().unwrap_or(1.0) as f64;
+                if degree[v] > 0.0 {
+                    acc += rank[v] as f64 * weight / degree[v];
                 }
             }
-            *out = base + damping * acc;
+            *out = base + damping * acc as f32;
         });
         // Redistribute dangling mass (degree-0 nodes) uniformly to preserve sum.
         let dangling: f32 = (0..n)
             .into_par_iter()
-            .map(|i| if deg[i] == 0 { rank[i] } else { 0.0 })
+            .map(|i| if degree[i] == 0.0 { rank[i] } else { 0.0 })
             .sum();
         let add = damping * dangling * inv_n;
         next.par_iter_mut().for_each(|r| *r += add);
@@ -124,7 +141,7 @@ pub fn pagerank(g: &mut Graph, iters: u32, damping: f32) -> Vec<f32> {
 /// Greedy graph coloring (largest-degree-first ordering). Returns a color index
 /// per node; adjacent nodes get distinct colors. Not optimal (NP-hard) but a
 /// good, fast proper coloring — useful both as a visual and as a real result.
-pub fn greedy_coloring(g: &mut Graph) -> Vec<u32> {
+pub fn greedy_coloring(g: &Graph) -> Vec<u32> {
     let n = g.num_nodes() as usize;
     let csr = g.csr();
     let mut order: Vec<u32> = (0..n as u32).collect();
@@ -161,7 +178,7 @@ pub fn degree_centrality(g: &Graph) -> Vec<u32> {
 
 /// Label propagation community detection. Fast, parallel-friendly heuristic:
 /// each node adopts the most frequent label among its neighbors. `iters` sweeps.
-pub fn label_propagation(g: &mut Graph, iters: u32) -> Vec<u32> {
+pub fn label_propagation(g: &Graph, iters: u32) -> Vec<u32> {
     let n = g.num_nodes() as usize;
     let csr = g.csr();
     let mut labels: Vec<u32> = (0..n as u32).collect();
@@ -240,5 +257,20 @@ mod tests {
         let pr = pagerank(&mut g, 30, 0.85);
         let sum: f32 = pr.iter().sum();
         assert!((sum - 1.0).abs() < 1e-2, "pagerank sum was {sum}");
+    }
+}
+
+#[cfg(test)]
+mod directed_tests {
+    use super::*;
+    #[test]
+    fn traversal_respects_direction_and_rank_uses_weights() {
+        let g = Graph::with_metadata(3, vec![[0, 1], [0, 2]], vec![true, true], vec![9.0, 1.0]);
+        assert_eq!(bfs_distances(&g, 1), vec![u32::MAX, 0, u32::MAX]);
+        let rank = pagerank(&g, 100, 0.85);
+        assert!(rank[1] > rank[2]);
+        assert!((rank.iter().sum::<f32>() - 1.0).abs() < 1e-5);
+        let empty = Graph::empty(0);
+        assert!(pagerank(&empty, 40, 0.85).is_empty());
     }
 }

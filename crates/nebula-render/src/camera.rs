@@ -35,6 +35,24 @@ impl Camera2D {
         }
     }
 
+    /// Fit into the unobscured canvas rectangle, in physical screen pixels.
+    pub fn fit_bounds_in_rect(
+        &mut self,
+        min: glam::Vec2,
+        max: glam::Vec2,
+        rect_min: glam::Vec2,
+        rect_max: glam::Vec2,
+    ) {
+        let size = (max - min).max(glam::Vec2::splat(1.0));
+        let extent = (rect_max - rect_min).max(glam::Vec2::splat(1.0));
+        self.zoom = (extent.x / size.x).min(extent.y / size.y) * 0.9;
+        if !self.zoom.is_finite() || self.zoom <= 0.0 {
+            self.zoom = 1.0;
+        }
+        let offset = (rect_min + rect_max) * 0.5 - self.viewport * 0.5;
+        self.center = (min + max) * 0.5 - glam::vec2(offset.x, -offset.y) / self.zoom;
+    }
+
     /// Zoom by a factor about a screen-space anchor (in pixels, origin top-left),
     /// keeping the world point under the cursor fixed.
     pub fn zoom_about(&mut self, factor: f32, screen: glam::Vec2) {
@@ -86,4 +104,22 @@ pub struct CameraUniform {
     pub viewport: [f32; 2],
     pub zoom: f32,
     pub _pad: f32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn fit_keeps_bounds_inside_unobscured_canvas() {
+        let mut camera = Camera2D::new(glam::vec2(1000.0, 800.0));
+        let lo = glam::vec2(-100.0, -50.0);
+        let hi = glam::vec2(100.0, 50.0);
+        let a = glam::vec2(220.0, 40.0);
+        let b = glam::vec2(650.0, 800.0);
+        camera.fit_bounds_in_rect(lo, hi, a, b);
+        for p in [lo, hi] {
+            let screen = camera.world_to_screen(p);
+            assert!(screen.cmpge(a).all() && screen.cmple(b).all());
+        }
+    }
 }

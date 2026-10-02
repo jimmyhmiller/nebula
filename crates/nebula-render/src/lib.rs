@@ -12,6 +12,7 @@ pub mod density;
 pub mod font;
 pub mod gpu;
 pub mod gputime;
+mod labels;
 pub mod layout_gpu;
 pub mod overlay;
 pub mod readback;

@@ -164,13 +164,13 @@ fn vs_pick(@builtin(vertex_index) vi: u32, @builtin(instance_index) inst: u32) -
     var out: PickOut;
     out.clip = vec4<f32>(center_ndc + corner * radius_ndc, 0.0, 1.0);
     out.uv = corner;
-    out.id = inst + 1u;
+    out.id = select(0u, inst + 1u, sizes[inst] > 0.0);
     return out;
 }
 
 @fragment
 fn fs_pick(in: PickOut) -> @location(0) u32 {
-    if (length(in.uv) > 1.0) {
+    if (in.id == 0u || length(in.uv) > 1.0) {
         discard;
     }
     return in.id;

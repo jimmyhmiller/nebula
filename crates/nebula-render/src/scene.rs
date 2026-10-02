@@ -59,6 +59,54 @@ pub struct GpuGraph {
 }
 
 impl GpuGraph {
+    pub fn validate(
+        graph: &Graph,
+        positions: &[Pos],
+        k: f32,
+        limits: &wgpu::Limits,
+    ) -> anyhow::Result<u64> {
+        anyhow::ensure!(
+            k.is_finite() && k > 0.0,
+            "Edge length must be positive and finite"
+        );
+        let n = graph.num_nodes();
+        let e = graph.num_edges();
+        anyhow::ensure!(n < u32::MAX as u64, "Graph exceeds 32-bit picking IDs");
+        anyhow::ensure!(
+            positions.len() as u64 == n && positions.iter().flatten().all(|x| x.is_finite()),
+            "Invalid node positions"
+        );
+        let csr = graph.csr();
+        anyhow::ensure!(
+            csr.targets.len() <= u32::MAX as usize,
+            "Graph exceeds 32-bit GPU adjacency offsets. Open a smaller subgraph."
+        );
+        let dim = ((1.6 * (n.max(1) as f64).sqrt()).ceil() as u32)
+            .next_power_of_two()
+            .clamp(4, 2048) as u64;
+        let buffers = [
+            ("positions", 8 * n.max(1)),
+            ("edges", 8 * e.max(1)),
+            ("adjacency", 4 * (csr.targets.len() as u64).max(1)),
+            ("offsets", 4 * (n + 1)),
+            ("grid", 4 * dim * dim),
+            ("pyramid", (dim * dim * 8 * 4 / 3) + 128),
+        ];
+        let limit = limits
+            .max_buffer_size
+            .min(limits.max_storage_buffer_binding_size as u64);
+        for (name, bytes) in buffers {
+            anyhow::ensure!(bytes <= limit, "{name} needs {:.0} MiB; this GPU supports {:.0} MiB per buffer. Open a smaller subgraph.",bytes as f64/1048576.0,limit as f64/1048576.0);
+        }
+        anyhow::ensure!(
+            limits.max_compute_invocations_per_workgroup >= 256
+                && limits.max_compute_workgroup_size_x >= 256
+                && limits.max_storage_buffers_per_shader_stage >= 10,
+            "GPU lacks the compute capabilities required by Nebula"
+        );
+        Ok(32 * n + 16 * e + 32 * dim * dim)
+    }
+
     /// Upload a graph plus its seeded positions. `graph` must already have CSR
     /// built (call `graph.ensure_csr()` first) — we borrow it here.
     pub fn upload(
@@ -91,13 +139,19 @@ impl GpuGraph {
 
         let positions_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("positions"),
-            contents: bytemuck::cast_slice(positions),
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+            contents: if positions.is_empty() {
+                bytemuck::cast_slice(&[[0.0f32; 2]])
+            } else {
+                bytemuck::cast_slice(positions)
+            },
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
         });
 
         let velocities = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("velocities"),
-            size: (n * std::mem::size_of::<[f32; 2]>()) as u64,
+            size: (n.max(1) * std::mem::size_of::<[f32; 2]>()) as u64,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -131,7 +185,11 @@ impl GpuGraph {
         let csr = graph
             .csr_ref()
             .expect("GpuGraph::upload requires graph.ensure_csr() first");
-        let offsets_u32: Vec<u32> = csr.offsets.iter().map(|&o| o as u32).collect();
+        let offsets_u32: Vec<u32> = csr
+            .offsets
+            .iter()
+            .map(|&o| u32::try_from(o).expect("validated GPU adjacency offset"))
+            .collect();
         let csr_offsets = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("csr_offsets"),
             contents: bytemuck::cast_slice(&offsets_u32),
@@ -275,7 +333,11 @@ impl GpuGraph {
     /// buffers are recreated (sizes change with the edge set); callers must
     /// rebind anything referencing them (e.g. `LayoutGpu::rebind`).
     pub fn set_csr(&mut self, device: &wgpu::Device, csr: &nebula_core::Csr) {
-        let offsets_u32: Vec<u32> = csr.offsets.iter().map(|&o| o as u32).collect();
+        let offsets_u32: Vec<u32> = csr
+            .offsets
+            .iter()
+            .map(|&o| u32::try_from(o).expect("validated GPU adjacency offset"))
+            .collect();
         self.csr_offsets = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("csr_offsets"),
             contents: bytemuck::cast_slice(&offsets_u32),
@@ -297,4 +359,21 @@ impl GpuGraph {
 #[inline]
 pub fn pack_rgba(r: u8, g: u8, b: u8, a: u8) -> u32 {
     (r as u32) | ((g as u32) << 8) | ((b as u32) << 16) | ((a as u32) << 24)
+}
+
+#[cfg(test)]
+mod validation_tests {
+    use super::*;
+    #[test]
+    fn rejects_invalid_positions_and_small_adapter_buffers() {
+        let graph = Graph::new(200, vec![[0, 1]]);
+        let positions = vec![[0.0, 0.0]; 200];
+        let mut limits = wgpu::Limits::default();
+        limits.max_storage_buffers_per_shader_stage = 10;
+        assert!(GpuGraph::validate(&graph, &positions, 30.0, &limits).is_ok());
+        limits.max_storage_buffer_binding_size = 128;
+        assert!(GpuGraph::validate(&graph, &positions, 30.0, &limits).is_err());
+        assert!(GpuGraph::validate(&graph, &positions, 0.0, &limits).is_err());
+        assert!(GpuGraph::validate(&graph, &[], 30.0, &limits).is_err());
+    }
 }

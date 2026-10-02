@@ -61,11 +61,8 @@ impl Interner {
     }
     /// Ensure at least `n` nodes exist even if some are isolated (no edges).
     fn ensure_count(&mut self, n: u64) {
-        while (self.labels.len() as u64) < n {
-            let id = self.labels.len();
-            let key = id.to_string();
-            self.map.insert(key.clone(), id as NodeId);
-            self.labels.push(key);
+        for i in 0..n {
+            self.intern(&i.to_string());
         }
     }
 }
@@ -112,9 +109,17 @@ fn detect(ext: &str, text: &str) -> &'static str {
         "mtx"
     } else if trimmed.starts_with('{') || trimmed.starts_with('[') {
         "json"
-    } else if trimmed.starts_with("graph") || trimmed.starts_with("digraph") || trimmed.contains("->") || trimmed.contains("--") {
+    } else if trimmed.starts_with("graph")
+        || trimmed.starts_with("digraph")
+        || trimmed.contains("->")
+        || trimmed.contains("--")
+    {
         // could be dot; also GML starts with "graph [".
-        if trimmed.contains('[') && (trimmed.contains("node") || trimmed.contains("edge") || trimmed.starts_with("graph [")) {
+        if trimmed.contains('[')
+            && (trimmed.contains("node")
+                || trimmed.contains("edge")
+                || trimmed.starts_with("graph ["))
+        {
             "gml"
         } else {
             "dot"
@@ -131,7 +136,13 @@ fn detect(ext: &str, text: &str) -> &'static str {
 
 // --------------------------------------------------------------------------
 
-fn finish(mut interner: Interner, edges: Vec<[NodeId; 2]>, declared_nodes: Option<u64>, format: &'static str, directed: bool) -> Loaded {
+fn finish(
+    mut interner: Interner,
+    edges: Vec<[NodeId; 2]>,
+    declared_nodes: Option<u64>,
+    format: &'static str,
+    directed: bool,
+) -> Loaded {
     if let Some(n) = declared_nodes {
         interner.ensure_count(n);
     }
@@ -157,11 +168,19 @@ fn parse_edge_list(text: &str) -> Result<Loaded> {
     let mut edges = Vec::new();
     for line in text.lines() {
         let line = line.trim();
-        if line.is_empty() || line.starts_with('#') || line.starts_with("//") || line.starts_with('%') {
+        if line.is_empty()
+            || line.starts_with('#')
+            || line.starts_with("//")
+            || line.starts_with('%')
+        {
             continue;
         }
-        let mut parts = line.split(|c: char| c.is_whitespace() || c == ',' || c == ';').filter(|s| !s.is_empty());
-        let (Some(a), Some(b)) = (parts.next(), parts.next()) else { continue };
+        let mut parts = line
+            .split(|c: char| c.is_whitespace() || c == ',' || c == ';')
+            .filter(|s| !s.is_empty());
+        let (Some(a), Some(b)) = (parts.next(), parts.next()) else {
+            continue;
+        };
         let ia = it.intern(a);
         let ib = it.intern(b);
         if ia != ib {
@@ -186,14 +205,21 @@ fn parse_matrix_market(text: &str) -> Result<Loaded> {
         let mut p = l.split_whitespace();
         if dims.is_none() {
             // "rows cols nnz"
-            let rows: u64 = p.next().and_then(|s| s.parse().ok()).ok_or_else(|| anyhow!("mtx: bad size line"))?;
+            let rows: u64 = p
+                .next()
+                .and_then(|s| s.parse().ok())
+                .ok_or_else(|| anyhow!("mtx: bad size line"))?;
             let cols: u64 = p.next().and_then(|s| s.parse().ok()).unwrap_or(rows);
             dims = Some((rows, cols));
             continue;
         }
-        let (Some(a), Some(b)) = (p.next(), p.next()) else { continue };
+        let (Some(a), Some(b)) = (p.next(), p.next()) else {
+            continue;
+        };
         // 1-indexed.
-        let (Ok(ua), Ok(ub)) = (a.parse::<u64>(), b.parse::<u64>()) else { continue };
+        let (Ok(ua), Ok(ub)) = (a.parse::<u64>(), b.parse::<u64>()) else {
+            continue;
+        };
         if ua == 0 || ub == 0 {
             continue;
         }
@@ -229,8 +255,12 @@ fn parse_dimacs(text: &str) -> Result<Loaded> {
                 }
             }
             Some("e") | Some("a") => {
-                let (Some(a), Some(b)) = (p.next(), p.next()) else { continue };
-                let (Ok(ua), Ok(ub)) = (a.parse::<u64>(), b.parse::<u64>()) else { continue };
+                let (Some(a), Some(b)) = (p.next(), p.next()) else {
+                    continue;
+                };
+                let (Ok(ua), Ok(ub)) = (a.parse::<u64>(), b.parse::<u64>()) else {
+                    continue;
+                };
                 if ua == 0 || ub == 0 {
                     continue;
                 }
@@ -373,10 +403,7 @@ fn parse_json(text: &str) -> Result<Loaded> {
     let mut raw_attrs: Vec<(NodeId, Vec<(String, String)>)> = Vec::new();
     if let Some(nodes) = v.get("nodes").and_then(|n| n.as_array()) {
         for node in nodes {
-            let key = node
-                .get("id")
-                .and_then(&id_of)
-                .or_else(|| id_of(node));
+            let key = node.get("id").and_then(&id_of).or_else(|| id_of(node));
             if let Some(k) = key {
                 let cid = it.intern(&k);
                 if let Some(obj) = node.as_object() {
@@ -396,9 +423,7 @@ fn parse_json(text: &str) -> Result<Loaded> {
     // Endpoints of an edge, given as `[u, v]` or `{source, target}`.
     let endpoints = |e: &serde_json::Value| -> (Option<String>, Option<String>) {
         match e {
-            serde_json::Value::Array(pair) if pair.len() >= 2 => {
-                (id_of(&pair[0]), id_of(&pair[1]))
-            }
+            serde_json::Value::Array(pair) if pair.len() >= 2 => (id_of(&pair[0]), id_of(&pair[1])),
             serde_json::Value::Object(_) => (
                 e.get("source").and_then(&id_of),
                 e.get("target").and_then(&id_of),
@@ -418,7 +443,11 @@ fn parse_json(text: &str) -> Result<Loaded> {
     let mut typed: Vec<LoadedEdgeType> = Vec::new();
     if let Some(types) = v.get("edge_types").and_then(|t| t.as_array()) {
         for t in types {
-            let name = t.get("name").and_then(|n| n.as_str()).unwrap_or("edges").to_string();
+            let name = t
+                .get("name")
+                .and_then(|n| n.as_str())
+                .unwrap_or("edges")
+                .to_string();
             let color = t.get("color").and_then(&color_of);
             let mut te: Vec<[NodeId; 2]> = Vec::new();
             if let Some(arr) = t.get("edges").and_then(|e| e.as_array()) {
@@ -432,7 +461,11 @@ fn parse_json(text: &str) -> Result<Loaded> {
                     }
                 }
             }
-            typed.push(LoadedEdgeType { name, color, edges: te });
+            typed.push(LoadedEdgeType {
+                name,
+                color,
+                edges: te,
+            });
         }
     } else {
         for key in ["links", "edges"] {
@@ -484,7 +517,10 @@ fn parse_adjacency(text: &str) -> Result<Loaded> {
             continue;
         }
         let src = it.intern(head);
-        for nb in rest.split(|c: char| c.is_whitespace() || c == ',').filter(|s| !s.is_empty()) {
+        for nb in rest
+            .split(|c: char| c.is_whitespace() || c == ',')
+            .filter(|s| !s.is_empty())
+        {
             let dst = it.intern(nb);
             if src != dst {
                 edges.push([src, dst]);
@@ -500,7 +536,8 @@ mod tests {
 
     #[test]
     fn detect_and_parse_mtx() {
-        let s = "%%MatrixMarket matrix coordinate pattern symmetric\n% a comment\n3 3 2\n1 2\n2 3\n";
+        let s =
+            "%%MatrixMarket matrix coordinate pattern symmetric\n% a comment\n3 3 2\n1 2\n2 3\n";
         let l = load_bytes(s.as_bytes(), "mtx").unwrap();
         assert_eq!(l.format, "matrix-market");
         assert_eq!(l.graph.num_nodes(), 3);
